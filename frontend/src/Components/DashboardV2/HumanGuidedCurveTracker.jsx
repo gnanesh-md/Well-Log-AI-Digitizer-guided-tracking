@@ -24,7 +24,7 @@ const TRACK_API_URL =
   (typeof import.meta !== 'undefined' &&
     import.meta.env &&
     import.meta.env.VITE_GRAPH_GUIDED_TRACK) ||
-  'http://127.0.0.1:8000/guided-curve-track';
+  'http://127.0.0.1:8123/guided-curve-track';
 
 const CURVE_COLORS = ['#00C853', '#2962FF', '#FF6D00', '#D500F9', '#00B8D4', '#FFD600'];
 

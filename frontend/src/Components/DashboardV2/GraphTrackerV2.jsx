@@ -284,7 +284,7 @@ import toast from "react-hot-toast";
 /* ─── Constants ─────────────────────────────────────────────────────────────── */
 const API_URL =
   import.meta.env.VITE_GRAPH_API_URL ||
-  "https://well-digitizer-api.thedrake.ai/segment-and-graph";
+  "http://127.0.0.1:8123/segment-and-graph";
 
 const GRAPH_COLORS = [
   "#EF4444", "#22C55E", "#3B82F6", "#F59E0B",
@@ -296,7 +296,7 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const LAS_API_URL =
   import.meta.env.VITE_GRAPH_LAS ||
   import.meta.env.VITE_GRAPH_Las ||
-  "https://well-digitizer-api.thedrake.ai/generate-las-base64";
+  "http://127.0.0.1:8123/generate-las-base64";
 
 const normBoundary = (b, W, H) => {
   const l = clamp(+b.left || 0, 0, W);

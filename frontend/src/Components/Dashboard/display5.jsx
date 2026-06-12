@@ -21,13 +21,13 @@ import {
   FiX,
 } from "react-icons/fi";
 
-const apiUrl =
+const API_URL =
   import.meta.env.VITE_GRAPH_API_URL ||
-  "https://well-digitizer-api.thedrake.ai/segment-and-graph";
-const lasApiUrl =
+  "http://127.0.0.1:8123/segment-and-graph";
+const LAS_API_URL =
   import.meta.env.VITE_GRAPH_LAS ||
   import.meta.env.VITE_GRAPH_Las ||
-  "https://well-digitizer-api.thedrake.ai/generate-las-base64";
+  "http://127.0.0.1:8123/generate-las-base64";
 const GRAPH_COLORS = [
   "#FF0000",
   "#00FF00",

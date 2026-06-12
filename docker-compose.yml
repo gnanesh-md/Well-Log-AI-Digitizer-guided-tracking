@@ -22,8 +22,7 @@ services:
         condition: service_healthy
       python-multiline:
         condition: service_started
-    env_file:
-      - ./js-backend/.env
+
     environment:
       PORT: 5000
       MONGODB_URI: mongodb://mongo:27017/graphocr
@@ -35,8 +34,10 @@ services:
     build:
       context: ./python-multiline
     restart: unless-stopped
-    env_file:
-      - ./python-multiline/.env
+    environment:
+      YOLO_MODEL_PATH: models/extract_header_model.pt
+      TIFF_CHUNK_MODEL_PATH: best.pt
+      USE_UNET_PIPELINE: "false"
     ports:
       - "8123:8123"
 
