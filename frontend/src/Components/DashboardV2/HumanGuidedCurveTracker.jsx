@@ -75,6 +75,7 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
   const [tracking, setTracking] = useState(false);
   const [error, setError] = useState(null);
   const [history, setHistory] = useState([]);     // for undo
+  const [zoom, setZoom] = useState(1);
 
   const endpoint = apiUrl || TRACK_API_URL;
   const activeCurve = curves.find(c => c.id === activeId) || curves[0];
@@ -305,6 +306,7 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
         : blob.type.includes('jpeg') ? 'image.jpg' : 'image.png';
       form.append('file', blob, name);
       form.append('points', JSON.stringify(c.anchors));
+      form.append('curve_style', c.style || 'solid');
 
       const res = await fetch(endpoint, { method: 'POST', body: form });
       if (!res.ok) {
@@ -319,6 +321,7 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
         confidence: data.confidence,
         anchors: data.snapped_anchors || c.anchors,
         source: 'ai',
+        isSaved: false, // Reset saved flag because the curve has been updated
       };
       setCurves(prev => prev.map(cu => (cu.id === c.id ? tracked : cu)));
       if (onCurveTracked) {
@@ -389,9 +392,18 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
           <button
             onClick={() => {
               if (onSave) {
-                // only pass curves that have actual traced points
-                const validCurves = curves.filter(c => c.points && c.points.length > 0).map(c => c.points);
-                onSave(validCurves);
+                // only pass curves that have actual traced points and haven't been saved yet
+                const unsavedCurves = curves.filter(c => c.points && c.points.length > 0 && !c.isSaved);
+                if (unsavedCurves.length > 0) {
+                  onSave(unsavedCurves.map(c => c.points));
+                  // Mark them as saved so they aren't duplicated next time
+                  setCurves(prev => prev.map(c => 
+                    (c.points && c.points.length > 0) ? { ...c, isSaved: true } : c
+                  ));
+                } else {
+                  // If everything is already saved, just return to the main view
+                  onSave([]);
+                }
               }
             }}
             disabled={!curves.some(c => c.points && c.points.length > 0)}
@@ -415,6 +427,17 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
             }`}>
             <span className="w-3 h-3 rounded-full" style={{ background: c.color }} />
             {c.name}
+            <select
+              value={c.style || 'solid'}
+              onChange={(e) => {
+                e.stopPropagation();
+                setCurves(prev => prev.map(cu => cu.id === c.id ? { ...cu, style: e.target.value } : cu));
+              }}
+              className="ml-1 bg-white border border-gray-300 text-gray-700 text-xs rounded px-1 py-0.5 outline-none cursor-pointer"
+            >
+              <option value="solid">Solid</option>
+              <option value="dashed">Dashed</option>
+            </select>
             <span className="text-xs text-gray-400">{c.anchors.length} pts</span>
             {c.confidence != null && (
               <span className={`text-xs ${c.confidence > 0.7 ? 'text-green-600' : 'text-amber-600'}`}>
@@ -431,20 +454,33 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
           className="px-3 py-1.5 text-sm rounded-full border border-dashed border-gray-300 text-gray-500 hover:border-gray-500">
           + New Curve
         </button>
+
+        <div className="flex-1" />
+
+        {/* Zoom Controls */}
+        <div className="flex items-center bg-gray-50 border border-gray-200 rounded divide-x divide-gray-200 text-xs">
+          <button onClick={() => setZoom(z => Math.max(0.2, z - 0.2))} className="px-2 py-1 text-gray-600 hover:bg-gray-100">− Zoom Out</button>
+          <span className="px-2 py-1 font-semibold text-gray-700">{Math.round(zoom * 100)}%</span>
+          <button onClick={() => setZoom(z => Math.min(5, z + 0.2))} className="px-2 py-1 text-gray-600 hover:bg-gray-100">+ Zoom In</button>
+          <button onClick={() => setZoom(1)} className="px-2 py-1 text-gray-600 hover:bg-gray-100">Reset</button>
+        </div>
       </div>
 
       {/* canvas */}
       <div ref={containerRef}
-        className="relative overflow-auto border border-gray-300 rounded cursor-crosshair max-h-[700px] w-full">
-        <canvas
-          ref={canvasRef}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={() => { setMousePos(null); handleMouseUp(); }}
-          onContextMenu={(e) => e.preventDefault()}
-          className="max-w-none shadow-inner"
-        />
+        className="relative overflow-auto border border-gray-300 rounded cursor-crosshair max-h-[700px] w-full bg-gray-100">
+        <div style={{ width: canvasRef.current?.width * zoom || '100%', height: canvasRef.current?.height * zoom || '100%' }}>
+          <canvas
+            ref={canvasRef}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={() => { setMousePos(null); handleMouseUp(); }}
+            onContextMenu={(e) => e.preventDefault()}
+            className="max-w-none shadow-inner origin-top-left"
+            style={{ transform: `scale(${zoom})` }}
+          />
+        </div>
         {/* magnifying loupe */}
         {mousePos && imageUrl && !dragging && (
           <div

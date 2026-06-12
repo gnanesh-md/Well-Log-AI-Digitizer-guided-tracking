@@ -91,16 +91,18 @@ function ExportModal({ open, onClose, boundaries, onExport, graphLabels, autoDep
 }
 
 function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
-  const initial = useMemo(() => ({
-    graphA_curveName: defaults?.curveNames?.[0] || "",
-    graphA_xLeft: defaults?.graphs?.[0]?.minValue ?? "",
-    graphA_xRight: defaults?.graphs?.[0]?.maxValue ?? "",
-    graphB_curveName: defaults?.curveNames?.[1] || "",
-    graphB_xLeft: defaults?.graphs?.[1]?.minValue ?? "",
-    graphB_xRight: defaults?.graphs?.[1]?.maxValue ?? "",
-    depth_top: defaults?.depth?.top ?? "",
-    depth_bottom: defaults?.depth?.bottom ?? "",
-  }), [defaults]);
+  const initial = useMemo(() => {
+    return {
+      graphs: graphLabels.map((_, i) => ({
+        curveName: defaults?.curveNames?.[i] || "",
+        xLeft: defaults?.graphs?.[i]?.minValue ?? "",
+        xRight: defaults?.graphs?.[i]?.maxValue ?? "",
+      })),
+      depth_top: defaults?.depth?.top ?? "",
+      depth_bottom: defaults?.depth?.bottom ?? "",
+    };
+  }, [defaults, graphLabels]);
+  
   const [formData, setFormData] = useState(initial);
 
   useEffect(() => {
@@ -109,61 +111,65 @@ function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
 
   if (!open) return null;
 
-  const handleChange = field => event => {
+  const handleChange = (field) => (event) => {
     setFormData(prev => ({ ...prev, [field]: event.target.value }));
   };
 
+  const handleGraphChange = (index, field) => (event) => {
+    setFormData(prev => {
+      const newGraphs = [...prev.graphs];
+      newGraphs[index] = { ...newGraphs[index], [field]: event.target.value };
+      return { ...prev, graphs: newGraphs };
+    });
+  };
+
   const handleSubmit = () => {
-    const nameA = formData.graphA_curveName.trim();
-    const nameB = formData.graphB_curveName.trim();
-    if (!nameA) {
-      alert("Please enter a curve name for Graph A (e.g. SP, GR, CALI).");
+    const parsedGraphs = [];
+    let invalid = false;
+
+    for (let i = 0; i < formData.graphs.length; i++) {
+      const g = formData.graphs[i];
+      const name = g.curveName.trim();
+      if (!name) {
+        alert(`Please enter a curve name for Graph ${graphLabels[i] || i + 1}.`);
+        return;
+      }
+      const xLeft = parseFloat(g.xLeft);
+      const xRight = parseFloat(g.xRight);
+      if (!Number.isFinite(xLeft) || !Number.isFinite(xRight)) {
+        invalid = true;
+      }
+      if (xLeft === xRight) {
+        alert(`Graph ${graphLabels[i] || i + 1} left and right X values cannot be equal.`);
+        return;
+      }
+      parsedGraphs.push({ curveName: name, xLeft, xRight });
+    }
+
+    const names = parsedGraphs.map(g => g.curveName.toUpperCase());
+    if (new Set(names).size !== names.length) {
+      alert("All curve names must be unique.");
       return;
     }
-    if (!nameB) {
-      alert("Please enter a curve name for Graph B (e.g. MNOR, ILD, MSFL).");
+
+    const depth_top = parseFloat(formData.depth_top);
+    const depth_bottom = parseFloat(formData.depth_bottom);
+
+    if (invalid || !Number.isFinite(depth_top) || !Number.isFinite(depth_bottom)) {
+      alert("Please fill in all numerical fields with valid numbers.");
       return;
     }
-    if (nameA.toUpperCase() === nameB.toUpperCase()) {
-      alert("Graph A and Graph B curve names must be different from each other.");
-      return;
-    }
-    const parsed = {
-      graphA_curveName: nameA,
-      graphA_xLeft: parseFloat(formData.graphA_xLeft),
-      graphA_xRight: parseFloat(formData.graphA_xRight),
-      graphB_curveName: nameB,
-      graphB_xLeft: parseFloat(formData.graphB_xLeft),
-      graphB_xRight: parseFloat(formData.graphB_xRight),
-      depth_top: parseFloat(formData.depth_top),
-      depth_bottom: parseFloat(formData.depth_bottom),
-    };
-    const numericFields = [
-      "graphA_xLeft",
-      "graphA_xRight",
-      "graphB_xLeft",
-      "graphB_xRight",
-      "depth_top",
-      "depth_bottom",
-    ];
-    const invalid = numericFields.filter(field => !Number.isFinite(parsed[field]));
-    if (invalid.length) {
-      alert(`Please fill in all fields with valid numbers.\nMissing: ${invalid.join(", ")}`);
-      return;
-    }
-    if (parsed.graphA_xLeft === parsed.graphA_xRight) {
-      alert("Graph A left and right X values cannot be equal.");
-      return;
-    }
-    if (parsed.graphB_xLeft === parsed.graphB_xRight) {
-      alert("Graph B left and right X values cannot be equal.");
-      return;
-    }
-    if (parsed.depth_top >= parsed.depth_bottom) {
+
+    if (depth_top >= depth_bottom) {
       alert("Top depth must be less than Bottom depth.");
       return;
     }
-    onSubmit(parsed);
+
+    onSubmit({
+      graphs: parsedGraphs,
+      depth_top,
+      depth_bottom,
+    });
   };
 
   return (
@@ -175,43 +181,27 @@ function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
             Enter the physical values printed at each graph edge. Export will use 0.50 ft depth rows.
           </p>
         </div>
-        <div className="space-y-4 px-6 py-5">
-          <div className="rounded-xl border border-red-100 bg-red-50/60 p-3">
-            <h3 className="mb-2 text-xs font-bold text-red-700">Graph {graphLabels[0] || "A"}</h3>
-            <label className="mb-3 block text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-              Curve name
-              <input type="text" maxLength={20} value={formData.graphA_curveName} onChange={handleChange("graphA_curveName")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. SP, GR, CALI" />
-              <span className="mt-1 block normal-case tracking-normal text-gray-400">Used as the LAS column header.</span>
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                Left edge value
-                <input type="number" value={formData.graphA_xLeft} onChange={handleChange("graphA_xLeft")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. -200" />
+        <div className="space-y-4 px-6 py-5 max-h-[60vh] overflow-y-auto">
+          {formData.graphs.map((g, i) => (
+            <div key={i} className={`rounded-xl border p-3 ${i % 2 === 0 ? 'border-red-100 bg-red-50/60' : 'border-green-100 bg-green-50/60'}`}>
+              <h3 className={`mb-2 text-xs font-bold ${i % 2 === 0 ? 'text-red-700' : 'text-green-700'}`}>Graph {graphLabels[i] || i + 1}</h3>
+              <label className="mb-3 block text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                Curve name
+                <input type="text" maxLength={20} value={g.curveName} onChange={handleGraphChange(i, "curveName")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. SP, GR, CALI" />
+                <span className="mt-1 block normal-case tracking-normal text-gray-400">Used as the LAS column header.</span>
               </label>
-              <label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                Right edge value
-                <input type="number" value={formData.graphA_xRight} onChange={handleChange("graphA_xRight")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. 0" />
-              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                  Left edge value
+                  <input type="number" value={g.xLeft} onChange={handleGraphChange(i, "xLeft")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. 0" />
+                </label>
+                <label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                  Right edge value
+                  <input type="number" value={g.xRight} onChange={handleGraphChange(i, "xRight")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. 100" />
+                </label>
+              </div>
             </div>
-          </div>
-          <div className="rounded-xl border border-green-100 bg-green-50/60 p-3">
-            <h3 className="mb-2 text-xs font-bold text-green-700">Graph {graphLabels[1] || "B"}</h3>
-            <label className="mb-3 block text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-              Curve name
-              <input type="text" maxLength={20} value={formData.graphB_curveName} onChange={handleChange("graphB_curveName")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. MNOR, ILD, MSFL" />
-              <span className="mt-1 block normal-case tracking-normal text-gray-400">Used as the LAS column header.</span>
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                Left edge value
-                <input type="number" value={formData.graphB_xLeft} onChange={handleChange("graphB_xLeft")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. 0" />
-              </label>
-              <label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                Right edge value
-                <input type="number" value={formData.graphB_xRight} onChange={handleChange("graphB_xRight")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. 15000" />
-              </label>
-            </div>
-          </div>
+          ))}
           <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-3">
             <h3 className="mb-2 text-xs font-bold text-blue-700">Depth Axis - Shared</h3>
             <div className="grid grid-cols-2 gap-3">
@@ -2195,19 +2185,11 @@ export default function GraphTrackerV2() {
   };
 
   const handleScaleSubmit = (parsed) => {
-    const nextScales = sourceGraphLines.map((_, idx) => {
-      if (idx === 0) return { xLeft: parsed.graphA_xLeft, xRight: parsed.graphA_xRight };
-      if (idx === 1) return { xLeft: parsed.graphB_xLeft, xRight: parsed.graphB_xRight };
-      return {
-        xLeft: graphScales[idx]?.minValue ?? 0,
-        xRight: graphScales[idx]?.maxValue ?? 100,
-      };
-    });
-    const nextCurveNames = sourceGraphLines.map((_, idx) => {
-      if (idx === 0) return parsed.graphA_curveName;
-      if (idx === 1) return parsed.graphB_curveName;
-      return `G${gLabel(idx)}`;
-    });
+    const nextScales = parsed.graphs.map(g => ({
+      xLeft: g.xLeft,
+      xRight: g.xRight,
+    }));
+    const nextCurveNames = parsed.graphs.map(g => g.curveName);
     const nextDepthScale = { top: parsed.depth_top, bottom: parsed.depth_bottom, step: 0.5 };
     setAxisScales(nextScales);
     setCurveNames(nextCurveNames);
@@ -2247,8 +2229,8 @@ export default function GraphTrackerV2() {
       setShowScaleModal(true);
       return;
     }
-    if (!curveNames[0] || !curveNames[1]) {
-      alert("Curve names are missing. Please click Apply Boundaries and enter Graph A / Graph B names.");
+    if (curveNames.length === 0 || curveNames.some(n => !n)) {
+      alert("Curve names are missing. Please click Apply Boundaries and enter names for all curves.");
       setShowScaleModal(true);
       return;
     }
@@ -2785,8 +2767,9 @@ export default function GraphTrackerV2() {
           onWheel={onWheel}
           style={{ cursor: mode === "pan" ? (isPanning ? "grabbing" : "grab") : mode === "insert" ? "crosshair" : "default" }}>
           {imageUrl ? (
-            activeViewTab === "header" ? (
-              <div className="absolute inset-0 flex items-center justify-center bg-gray-50">
+            <>
+              {/* Header OCR View */}
+              <div className={`absolute inset-0 flex items-center justify-center bg-gray-50 ${activeViewTab === "header" ? "flex" : "hidden"}`}>
                 <div className="relative max-w-4xl max-h-full p-4 bg-white rounded-xl shadow-lg">
                   <div className="absolute top-2 left-2 bg-white/90 backdrop-blur px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-blue-600 border border-blue-100">
                     Header OCR Preview
@@ -2794,8 +2777,9 @@ export default function GraphTrackerV2() {
                   <img src={headerImageUrl || imageUrl} alt="Detected header preview" className="max-w-full max-h-[calc(100vh-140px)] object-contain rounded-md" />
                 </div>
               </div>
-            ) : activeViewTab === "guided" ? (
-              <div className="absolute inset-0 z-10 overflow-auto bg-gray-50 p-4">
+              
+              {/* Guided Tracking View (Persistent) */}
+              <div className={`absolute inset-0 z-10 overflow-auto bg-gray-50 p-4 ${activeViewTab === "guided" ? "block" : "hidden"}`}>
                 <HumanGuidedCurveTracker
                   imageUrl={imageUrl}
                   onSave={(updatedLines) => {
@@ -2828,11 +2812,12 @@ export default function GraphTrackerV2() {
                   }}
                 />
               </div>
-            ) : (
-              <div style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }}>
+
+              {/* Main Graph View */}
+              <div className={`${activeViewTab === "graph" ? "block" : "hidden"}`} style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)` }}>
                 <canvas ref={canvasRef} className="shadow-lg block" />
               </div>
-            )
+            </>
           ) : (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400">
               <svg className="w-16 h-16 mb-3 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>

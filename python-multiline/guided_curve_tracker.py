@@ -90,20 +90,82 @@ def _sample_curve_appearance(
     return np.median(allpix, axis=0).astype(np.float32)
 
 
-def _build_cost_map(
-    bgr: np.ndarray,
-    curve_lab: np.ndarray,
-    suppress_gridlines: bool = True,
-) -> np.ndarray:
+def _estimate_curve_style(bgr: np.ndarray, curve_lab: np.ndarray, anchors: List[Tuple[int, int]]) -> bool:
     """
-    cost(pixel) in [0, 1]:  0 = looks exactly like the learned curve,
-                            1 = looks nothing like it.
+    Analyzes the physical length of the ink directly underneath the user's anchors.
+    If the connected ink component is short (< 80px), it mathematically proves the curve is dashed.
+    Returns: is_dashed (bool)
     """
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    target_chroma = np.sqrt(curve_lab[1]**2 + curve_lab[2]**2)
+    wL, wa, wb = (2.5, 1.0, 1.0) if target_chroma < 12 else (0.3, 2.5, 2.5)
+    
+    dL = lab[:, :, 0] - curve_lab[0]
+    dL = np.where(dL < 0, dL * 0.8, dL)
+    da = lab[:, :, 1] - curve_lab[1]
+    db = lab[:, :, 2] - curve_lab[2]
+    
+    dist = np.sqrt(wL * dL * dL + wa * da * da + wb * db * db)
+    cost = np.clip(dist / 60.0, 0.0, 1.0)
+    
+    ink_mask = (cost < 0.35).astype(np.uint8)
+    
+    h, w = bgr.shape[:2]
+    votes_dashed = 0
+    
+    for x, y in anchors:
+        y0 = max(0, y - 100)
+        y1 = min(h, y + 100)
+        x0 = max(0, x - 50)
+        x1 = min(w, x + 50)
+        patch = ink_mask[y0:y1, x0:x1]
+        
+        # Local coordinates of the anchor within the patch
+        lx, ly = x - x0, y - y0
+        
+        # Find all connected components of ink in this 200x100 window
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(patch, connectivity=8)
+        
+        if num_labels <= 1:
+            continue # No ink found
+            
+        # Find which connected component is closest to the anchor click
+        min_dist = float('inf')
+        best_label = -1
+        for i in range(1, num_labels):
+            # Check pixels belonging to this component
+            comp_ys, comp_xs = np.where(labels == i)
+            if len(comp_xs) == 0: continue
+            
+            # Distance from click to the closest pixel of this component
+            dists = (comp_xs - lx)**2 + (comp_ys - ly)**2
+            min_d = np.min(dists)
+            
+            if min_d < min_dist and min_d < 400: # must be within 20px (400 squared)
+                min_dist = min_d
+                best_label = i
+                
+        if best_label != -1:
+            # Measure the bounding box height of the ink component the user clicked on
+            _, _, _, comp_h, _ = stats[best_label]
+            
+            # If the continuous ink is less than 80 pixels tall, it's a dash!
+            if comp_h < 80:
+                votes_dashed += 1
+            
+    return votes_dashed > 0
 
-    # Highly prioritize color match (chroma) over lightness to track colored lines accurately even if they fade.
-    # However, if the target curve is grayscale/black, we MUST rely heavily on lightness.
-    target_chroma = abs(curve_lab[1] - 128) + abs(curve_lab[2] - 128)
+
+def _build_cost_map(bgr: np.ndarray, curve_lab: np.ndarray, is_dashed: bool, suppress_gridlines: bool = True) -> np.ndarray:
+    """
+    Build a pixel-wise cost map for pathfinding.
+    Cost is high for background/grid and low for pixels matching curve_lab.
+    Adaptive Physics: Gap bridging and solid-line erasure is ONLY applied if is_dashed is true.
+    """
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    
+    # Increase tolerance for the L channel to handle faded ink
+    target_chroma = np.sqrt(curve_lab[1]**2 + curve_lab[2]**2)
     if target_chroma < 12:
         wL, wa, wb = 2.5, 1.0, 1.0
     else:
@@ -121,25 +183,77 @@ def _build_cost_map(
     # Stricter normalization for enhanced color isolation
     cost = np.clip(dist / 60.0, 0.0, 1.0)
 
+    # 1. ADAPTIVE SOLID LINE ERASURE
+    if is_dashed:
+        # Detect solid lines using connected components. A wavy solid line will be a single massive connected component.
+        # A dashed line will be many tiny disconnected components.
+        curve_ink = (cost < 0.35).astype(np.uint8)
+        
+        # We want to connect very small anti-aliasing gaps in the solid line first, 
+        # so it doesn't artificially break into pieces.
+        kernel_tiny = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 5))
+        ink_closed = cv2.morphologyEx(curve_ink, cv2.MORPH_CLOSE, kernel_tiny)
+        
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(ink_closed, connectivity=8)
+        
+        solid_lines_mask = np.zeros_like(curve_ink)
+        
+        # stats: [x, y, w, h, area]
+        for i in range(1, num_labels):
+            h_comp = stats[i, cv2.CC_STAT_HEIGHT]
+            # If a continuous blob of ink is taller than 80 pixels, it is undeniably a solid curve!
+            if h_comp > 80:
+                solid_lines_mask[labels == i] = 1
+                
+        # Eradicate these massive solid lines from the dashed tracker's vision!
+        # This makes it mathematically impossible for the dashed tracker to jump onto the solid curve.
+        cost = np.where(solid_lines_mask == 1, np.minimum(cost + 0.8, 1.0), cost)
+
     if suppress_gridlines:
-        # Detect long straight horizontal & vertical strokes (grid).
+        # The original code only suppressed dark gridlines. We safely extend it to suppress colored horizontal gridlines.
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         dark = (gray < 160).astype(np.uint8) * 255
+        
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        sat = hsv[:, :, 1]
+        colored_ink = (sat > 40).astype(np.uint8) * 255
+        all_ink = cv2.bitwise_or(dark, colored_ink)
+        
+        # Horizontal lines: use all_ink, close dashed gridlines first, then detect > 51px straight
+        hk_close = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+        ink_closed_h = cv2.morphologyEx(all_ink, cv2.MORPH_CLOSE, hk_close)
         hk = cv2.getStructuringElement(cv2.MORPH_RECT, (51, 1))
+        hlines = cv2.morphologyEx(ink_closed_h, cv2.MORPH_OPEN, hk)
+        
+        # Vertical lines: STRICTLY use dark ink only! Never erase vertical colored lines (which are the curves).
         vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 51))
-        hlines = cv2.morphologyEx(dark, cv2.MORPH_OPEN, hk)
         vlines = cv2.morphologyEx(dark, cv2.MORPH_OPEN, vk)
+        
         grid = ((hlines > 0) | (vlines > 0))
 
         # Unconditionally penalize grid lines so they are strictly avoided
         cost = np.where(grid, np.minimum(cost + 0.8, 1.0), cost)
 
-    # Enhance dotted/dashed lines by closing vertical gaps in low-cost regions
-    # Use a narrow vertical kernel to bridge gaps without bleeding horizontally into parallel curves
-    curve_mask = (cost < 0.35).astype(np.uint8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 25))
-    closed_mask = cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel)
-    # Only fill gaps without destroying the deep sub-pixel valleys of the actual ink
+    # 2. ADAPTIVE GAP BRIDGING
+    curve_mask = (cost < 0.45).astype(np.uint8)
+    
+    if is_dashed:
+        # Massive vertical bridge for large dropouts and erased horizontal gridlines
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 45))
+        closed_mask = cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel_v)
+        
+        # Diagonal bridges for sloped dashed lines
+        kernel_diag1 = np.eye(31, dtype=np.uint8)
+        kernel_diag2 = np.fliplr(kernel_diag1)
+        closed_mask = np.maximum(closed_mask, cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel_diag1))
+        closed_mask = np.maximum(closed_mask, cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel_diag2))
+    else:
+        # For solid curves, use a tiny 5-pixel bridge just to fix anti-aliasing artifacts.
+        # This guarantees that dashed lines REMAIN broken, so the solid tracker never jumps onto them!
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 5))
+        closed_mask = cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel_v)
+    
+    # Only fill gaps softly, leaving a small cost so the AI still prefers real ink
     cost = np.where((closed_mask == 1) & (cost > 0.35), 0.35, cost)
 
     return cost.astype(np.float32)
@@ -290,10 +404,11 @@ def trace_guided_curve(
     snap_radius: int = 15,
     max_slope_px: int = 35,
     move_penalty: float = 0.04,
-    curvature_penalty: float = 0.12,
+    curvature_penalty: float = 0.08,
     corridor_pad: int = 800,
     smooth_window: int = 7,
     suppress_gridlines: bool = True,
+    curve_style: str = "solid",
 ) -> dict:
     if len(anchors_xy) < 2:
         raise ValueError("At least 2 anchor points are required")
@@ -304,7 +419,18 @@ def trace_guided_curve(
 
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     curve_lab = _sample_curve_appearance(lab, anchors)
-    cost = _build_cost_map(bgr, curve_lab, suppress_gridlines)
+    
+    # 1. EXPLICIT STYLE OVERRIDE
+    is_dashed = (curve_style == "dashed")
+    
+    # Build cost map with adaptive gap bridging and solid line erasure
+    cost = _build_cost_map(bgr, curve_lab, is_dashed, suppress_gridlines)
+
+    # 2. ADAPTIVE PHYSICS
+    if is_dashed:
+        curvature_penalty = 0.15  # Extremely stiff to blast through erased solid lines
+    else:
+        curvature_penalty = 0.05  # Highly flexible to follow tight bends
 
     snapped = [_snap_anchor(cost, x, y, snap_radius) for (x, y) in anchors]
     # Well-log curves are functions of depth: order anchors top -> bottom.
@@ -367,6 +493,7 @@ def _register_endpoint():
         corridor_pad: int = Form(800),
         smooth_window: int = Form(7),
         suppress_gridlines: bool = Form(True),
+        curve_style: str = Form("solid"),
     ):
         """
         Human-guided AI curve tracing.
@@ -404,6 +531,7 @@ def _register_endpoint():
                 corridor_pad=corridor_pad,
                 smooth_window=smooth_window,
                 suppress_gridlines=suppress_gridlines,
+                curve_style=curve_style,
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
