@@ -12,7 +12,7 @@ except Exception:
 
 
 MIN_DIM = 800
-DEFAULT_MODEL = "qwen2.5vl:7b"
+DEFAULT_MODEL = "qwen2.5-vl:32b"
 MODEL_OPTIONS = {
   "temperature": 0,
     "num_ctx": 4096,
@@ -69,7 +69,12 @@ def _upscale_if_small(img: Image.Image) -> Image.Image:
     width, height = img.size
     if min(width, height) < MIN_DIM:
         scale = MIN_DIM / min(width, height)
-        img = img.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+        # Prevent the longest dimension from exploding beyond a safe maximum (e.g. 10000 pixels)
+        safe_max = 10000
+        if max(width, height) * scale > safe_max:
+            scale = safe_max / max(width, height)
+        if scale > 1.0:
+            img = img.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
     return img
 
 
@@ -214,7 +219,9 @@ def extract_header_text_with_ollama(
                 messages=[{
                     "role": "user",
                     "content": prompt,
-                    "images": [_image_to_jpeg_bytes(processed)],
+                    "images": [
+                        (print("DEBUG OLLAMA IMAGE SIZE:", processed.size, flush=True), _image_to_jpeg_bytes(processed))[1]
+                    ],
                 }],
                 options=MODEL_OPTIONS,
             )
@@ -232,6 +239,8 @@ def extract_header_text_with_ollama(
                     best_text = text
                     best_metadata = metadata
         except Exception as e:
+            import traceback
+            print("OLLAMA ERROR TRACEBACK:", traceback.format_exc(), flush=True)
             last_error = str(e)
             continue
 

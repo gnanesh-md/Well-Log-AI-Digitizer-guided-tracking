@@ -23,9 +23,10 @@ from dotenv import load_dotenv
 import re
 from pathlib import Path
 from boxRemoval import process_one_image
-from tiff_chunk_detect import process_tiff_bytes_for_backend, process_image_for_backend
+from tiff_chunk_detect import process_tiff_bytes_for_backend, process_image_for_backend, load_tiff_pages_from_bytes
 from curve_value_matcher import CurveValueMatcher, create_curve_info
 from graph_vision_analyzer import GraphVisionAnalyzer
+from header_ocr_engine import extract_header_text_with_ollama
 
 # NOTE: OCR integration (easyocr / ollama / gemini / openai header OCR) has been
 # removed for lightweight CPU-only systems. To re-integrate later, restore the
@@ -44,8 +45,8 @@ app.include_router(guided_curve_router)
 # Prepare the request
 YOLO_MODEL_PATH=os.getenv("YOLO_MODEL_PATH")
 TIFF_CHUNK_MODEL_PATH = os.getenv("TIFF_CHUNK_MODEL_PATH") or "best.pt"
-# OCR removed: keep a placeholder so existing metadata fields stay consistent.
-HEADER_OCR_MODEL = "disabled"
+# OCR model configured
+HEADER_OCR_MODEL = "qwen2.5vl:32b"
 
 # Pipeline mode: True = SVM+UNet, False = direct thresholding on cleaned image.
 # The checked-in model files may be Git LFS pointers, so default to the
@@ -987,19 +988,27 @@ class LasHeader(BaseModel):
     las_well: Optional[List[HeaderItem]] = None
 
 def extract_las_header(image):
-    """OCR removed: header text extraction is disabled on this lightweight build.
-
-    Returns empty header data with metadata marking the engine as disabled.
-    Re-integrate OCR later by restoring the original implementation.
-    """
-    print("[INFO] Header OCR requested but OCR integration is disabled in this build.")
-    metadata = {
-        "engine": "disabled",
-        "model": None,
-        "strategy": None,
-        "status": "disabled",
-    }
-    return {}, "", metadata
+    """Extract well log header info using Ollama vision model."""
+    print(f"[INFO] Header OCR requested using model {HEADER_OCR_MODEL}.")
+    try:
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        else:
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+            
+        header_text, metadata = extract_header_text_with_ollama(image_rgb, model_name=HEADER_OCR_MODEL)
+        las_header = parse_well_log_ocr_to_las_header(header_text)
+        return las_header, header_text, metadata
+    except Exception as e:
+        print(f"[ERROR] extract_las_header failed: {e}")
+        metadata = {
+            "engine": "error",
+            "model": HEADER_OCR_MODEL,
+            "strategy": None,
+            "status": "failed",
+            "error": str(e)
+        }
+        return {}, "", metadata
 
 
 def parse_well_log_ocr_to_las_header(ocr_text):
@@ -2201,7 +2210,7 @@ async def segment_and_graph(
     total_graphs: float = Form(2),
     patch_size: int = Form(96),
     batch_size: int = Form(32),
-    include_header_ocr: bool = Form(False),
+    include_header_ocr: bool = Form(True),
     include_depth_ocr: bool = Form(False),
     include_graph_vision: bool = Form(False),
     manual_graph_box: Optional[str] = Form(None),
@@ -2442,6 +2451,21 @@ async def tiff_chunk_detect(file: UploadFile = File(...)):
         raise HTTPException(400, "Uploaded TIFF is empty")
 
     try:
+        pages = load_tiff_pages_from_bytes(tiff_bytes)
+        las_header = {}
+        header_ocr_text = ""
+        header_ocr_metadata = {}
+        header_image_base64 = ""
+
+        if pages:
+            first_page = pages[0]
+            layout_info = detect_layout_regions(first_page, YOLO_MODEL_PATH)
+            header_image = crop_box(first_page, layout_info["header_box"])
+            las_header, header_ocr_text, header_ocr_metadata = extract_las_header(image=header_image)
+            
+            _, header_buf = cv2.imencode('.png', header_image)
+            header_image_base64 = base64.b64encode(header_buf).decode("ascii")
+
         page_results = process_tiff_bytes_for_backend(tiff_bytes=tiff_bytes, model_path=TIFF_CHUNK_MODEL_PATH)
     except Exception as e:
         raise HTTPException(500, f"TIFF chunk detection failed: {str(e)}")
@@ -2467,6 +2491,10 @@ async def tiff_chunk_detect(file: UploadFile = File(...)):
         "model_path": TIFF_CHUNK_MODEL_PATH,
         "page_count": len(response_pages),
         "pages": response_pages,
+        "las_header": las_header,
+        "header_ocr_text": header_ocr_text,
+        "header_ocr_metadata": header_ocr_metadata,
+        "header_image_png_base64": header_image_base64,
     })
 
 
@@ -2578,6 +2606,11 @@ async def generate_las(request: Request):
             if not re.match(r"^\s*DLM\s*\.", line, flags=re.IGNORECASE)
         ) + ("\n" if las_text.endswith("\n") else "")
         las_text = las_text.replace(" -999.25 ", " -999.2500 ")
+        
+        # Prepend the raw OCR text as comments
+        if header_ocr_text:
+            las_text = prepend_las_header_comments(las_text, header_ocr_text)
+
         las_content = las_text.encode("utf-8")
         base64_las = base64.b64encode(las_content).decode("utf-8")
 

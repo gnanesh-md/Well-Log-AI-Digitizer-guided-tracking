@@ -7,7 +7,7 @@ services:
     volumes:
       - mongo_data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      test: [ "CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,20 +26,24 @@ services:
     environment:
       PORT: 5000
       MONGODB_URI: mongodb://mongo:27017/graphocr
-      PYTHON_SERVICE_URL: http://python-multiline:8123
+      PYTHON_SERVICE_URL: http://host.docker.internal:8123
     ports:
       - "5000:5000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   python-multiline:
     build:
       context: ./python-multiline
     restart: unless-stopped
+    network_mode: "host"
     environment:
-      YOLO_MODEL_PATH: models/extract_header_model.pt
+      YOLO_MODEL_PATH: best.pt
       TIFF_CHUNK_MODEL_PATH: best.pt
       USE_UNET_PIPELINE: "false"
-    ports:
-      - "8123:8123"
+    volumes:
+      - ./python-multiline/best.pt:/app/best.pt
+      - ./python-multiline/models:/app/models
 
   frontend:
     build:

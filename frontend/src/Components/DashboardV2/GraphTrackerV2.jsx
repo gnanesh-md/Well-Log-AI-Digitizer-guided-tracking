@@ -2783,6 +2783,7 @@ export default function GraphTrackerV2() {
                 <HumanGuidedCurveTracker
                   imageUrl={imageUrl}
                   onSave={(updatedLines) => {
+                    setActiveViewTab("graph");
                     if (!updatedLines || updatedLines.length === 0) return;
                     // For each curve traced, we add it to sourceGraphLines
                     const newLines = [...sourceGraphLines];
@@ -2803,6 +2804,19 @@ export default function GraphTrackerV2() {
                     const newVisibleMap = { ...visibleGraphMap };
                     for (let i = 0; i < newLines.length; i++) { newVisibleMap[i] = true; }
                     setVisibleGraphMap(newVisibleMap);
+                    
+                    setGraphScales(prev => {
+                      const nextScales = [...prev];
+                      while (nextScales.length < newLines.length) {
+                        nextScales.push({
+                          minValue: 0,
+                          maxValue: 100,
+                          topDepth: depthScale.top,
+                          bottomDepth: depthScale.bottom,
+                        });
+                      }
+                      return nextScales;
+                    });
                     
                     pushHistory(newLines, newBounds);
                     setActiveViewTab("graph");
