@@ -1719,8 +1719,13 @@ def pixel_y_to_depth(pixel_y, top_pixel, bottom_pixel, top_depth, bottom_depth):
     return top_depth + ratio * (bottom_depth - top_depth)
 
 
-def pixel_points_to_physical(points, pixel_bounds, x_range, y_range):
-    """Convert tracked pixel points to [physical_value, real_depth] pairs."""
+def pixel_points_to_physical(points, pixel_bounds, x_range, y_range, wrap_levels=None):
+    """Convert tracked pixel points to [physical_value, real_depth] pairs.
+    
+    If wrap_levels is provided (list aligned to points, None at break markers),
+    each point's value is offset by wrap_levels[i] * (max_value - min_value)
+    to reconstruct the true multi-cycle value.
+    """
     if not pixel_bounds or len(pixel_bounds) != 4:
         raise ValueError("pixel_bounds must be [left, top, right, bottom]")
     if not x_range or len(x_range) != 2:
@@ -1731,14 +1736,25 @@ def pixel_points_to_physical(points, pixel_bounds, x_range, y_range):
     left, top, right, bottom = [float(value) for value in pixel_bounds]
     min_value, max_value = [float(value) for value in x_range]
     top_depth, bottom_depth = [float(value) for value in y_range]
+    value_range = max_value - min_value
 
     converted = []
-    for pixel_x, pixel_y in points:
+    for i, pt in enumerate(points):
+        if pt is None:
+            continue  # skip break markers
+        pixel_x, pixel_y = pt[0], pt[1]
+        base_value = pixel_x_to_physical(pixel_x, left, right, min_value, max_value)
+        wrap_level = 0
+        if wrap_levels is not None and i < len(wrap_levels) and wrap_levels[i] is not None:
+            wrap_level = int(wrap_levels[i])
+        # Apply wrap-level offset: NOT clamped — values intentionally exceed [min, max]
+        physical_value = base_value + wrap_level * value_range
         converted.append([
-            pixel_x_to_physical(pixel_x, left, right, min_value, max_value),
+            physical_value,
             pixel_y_to_depth(pixel_y, top, bottom, top_depth, bottom_depth),
         ])
     return converted
+
 
 
 def rescale_pixel_data(points, current_bounds, target_bounds, debug=True):

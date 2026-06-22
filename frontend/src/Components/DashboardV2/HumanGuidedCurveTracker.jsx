@@ -26,7 +26,15 @@ const TRACK_API_URL =
     import.meta.env.VITE_GRAPH_GUIDED_TRACK) ||
   'http://127.0.0.1:8123/guided-curve-track';
 
-const CURVE_COLORS = ['#00C853', '#2962FF', '#FF6D00', '#D500F9', '#00B8D4', '#FFD600'];
+const CURVE_COLORS = [
+  '#2962FF', '#00C853', '#FF6D00', '#D500F9', '#00B8D4',
+  '#FFD600', '#F50057', '#00BFA5', '#FF6E40', '#6200EA'
+];
+
+const COLOR_NAMES = [
+  'Blue', 'Green', 'Orange', 'Purple', 'Cyan',
+  'Yellow', 'Pink', 'Teal', 'Deep Orange', 'Violet'
+];
 
 // Fallback only (used when the backend is unreachable): smooth spline
 // through the anchors. NOT real curve tracking.
@@ -56,14 +64,28 @@ const newCurve = () => ({
   id: `curve-${Date.now()}-${curveCounter++}`,
   name: `Curve ${curveCounter}`,
   color: CURVE_COLORS[(curveCounter - 1) % CURVE_COLORS.length],
-  anchors: [],          // [[x, y], ...] user clicks (snapped client-side)
-  points: [],           // AI-traced path [[x, y], ...]
-  segments: [],         // per-segment confidence from backend
+  style: 'solid',
+  wrapMode: false,
+  activeFragmentId: null,
+  fragments: [],        // { id, anchors, points, segments, confidence, wrapLevel, edgeIn, edgeOut, wrapLevelManual }
+  anchors: [],          // legacy (non-wrap) [[x, y], ...] user clicks (snapped client-side)
+  points: [],           // legacy (non-wrap) AI-traced path [[x, y], ...]
+  segments: [],         // legacy (non-wrap) per-segment confidence from backend
   confidence: null,
   source: null,         // 'ai' | 'fallback'
 });
 
-const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) => {
+const HumanGuidedCurveTracker = ({
+  imageUrl,
+  onCurveTracked,
+  onSave,
+  apiUrl,
+  trackBounds = [],
+  zoom: parentZoom,
+  setZoom: parentSetZoom,
+  panOffset: parentPanOffset,
+  setPanOffset: parentSetPanOffset
+}) => {
   const canvasRef = useRef(null);
   const imageRef = useRef(null);
   const containerRef = useRef(null);
@@ -75,9 +97,31 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
   const [tracking, setTracking] = useState(false);
   const [error, setError] = useState(null);
   const [history, setHistory] = useState([]);     // for undo
-  const [zoom, setZoom] = useState(1);
+  const [localZoom, setLocalZoom] = useState(1);
+  const zoom = parentZoom ?? localZoom;
+  const setZoom = parentSetZoom ?? setLocalZoom;
+
+  const [colorPickerOpen, setColorPickerOpen] = useState(null);
+  const [editingCurveId, setEditingCurveId] = useState(null);
+  const [panMode, setPanMode] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  
+  const [localPanOffset, setLocalPanOffset] = useState({ x: 0, y: 0 });
+  const panOffset = parentPanOffset ?? localPanOffset;
+  const setPanOffset = parentSetPanOffset ?? setLocalPanOffset;
+  
+  const panStart = useRef(null);
 
   const endpoint = apiUrl || TRACK_API_URL;
+
+  const getActiveTrackBounds = (points) => {
+    if (!points || !points.length || !trackBounds.length) return [-1, -1];
+    const [x, y] = points[0];
+    for (const b of trackBounds) {
+      if (x >= b.left && x <= b.right) return [b.left, b.right];
+    }
+    return [-1, -1];
+  };
   const activeCurve = curves.find(c => c.id === activeId) || curves[0];
 
   /* ---------------- image loading ---------------- */
@@ -122,6 +166,60 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
     return [bx, by];
   };
 
+
+  // STEP 1: Compute fragment entry/exit edges from its tracked points.
+  // Used as a fallback when the backend edge_in/edge_out is null.
+  const computeFragmentEdges = (frag, trackLeft, trackRight) => {
+    const pts = frag.points || [];
+    if (pts.length < 2) return { edgeIn: null, edgeOut: null };
+    const tol = 0.06 * Math.max(trackRight - trackLeft, 1);
+    const edgeOf = (x) => {
+      if (x <= trackLeft + tol) return 'left';
+      if (x >= trackRight - tol) return 'right';
+      return null;
+    };
+    const sorted = [...pts].sort((a, b) => a[1] - b[1]); // sort by y (depth)
+    const topX = sorted[0][0];
+    const botX = sorted[sorted.length - 1][0];
+    return { edgeIn: edgeOf(topX), edgeOut: edgeOf(botX) };
+  };
+
+  // STEP 2: Recompute wrap levels from edge transitions between fragments.
+  // Piece 1 = L0; each subsequent piece increments by +1 if prev exited right→left,
+  // or -1 if left→right. Manual overrides are preserved.
+  const recomputeWrapLevels = (curve, trackLeft, trackRight) => {
+    if (!curve.fragments || !curve.fragments.length) return curve;
+    const frags = curve.fragments.map(f => {
+      // Auto-fill edges from points if backend didn't supply them
+      if ((f.edgeIn === null || f.edgeIn === undefined) ||
+          (f.edgeOut === null || f.edgeOut === undefined)) {
+        if (trackLeft != null && trackRight != null && f.points?.length >= 2) {
+          const computed = computeFragmentEdges(f, trackLeft, trackRight);
+          return {
+            ...f,
+            edgeIn:  f.edgeIn  ?? computed.edgeIn,
+            edgeOut: f.edgeOut ?? computed.edgeOut,
+          };
+        }
+      }
+      return f;
+    });
+
+    // Piece 1: always L0 unless manually overridden
+    frags[0] = { ...frags[0], wrapLevel: frags[0].wrapLevelManual ? frags[0].wrapLevel : 0 };
+
+    for (let i = 1; i < frags.length; i++) {
+      if (frags[i].wrapLevelManual) continue; // respect manual +/-
+      const prevOut = frags[i - 1].edgeOut;
+      const thisIn  = frags[i].edgeIn;
+      let step = 0;
+      if (prevOut === 'right' && thisIn === 'left')  step = +1; // value crossed Vmax upward
+      if (prevOut === 'left'  && thisIn === 'right') step = -1; // value crossed Vmin downward
+      frags[i] = { ...frags[i], wrapLevel: frags[i - 1].wrapLevel + step };
+    }
+    return { ...curve, fragments: frags };
+  };
+
   /* ---------------- coordinate helpers ---------------- */
   const canvasCoords = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -138,15 +236,83 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
   const updateActive = (fn) =>
     setCurves(prev => prev.map(c => (c.id === activeId ? fn(c) : c)));
 
+
+  const toggleWrapMode = async () => {
+    const c = activeCurve;
+    if (!c) return;
+    
+    // STEP 3: Exit wrap mode
+    if (c.wrapMode) {
+      updateActive(() => ({ ...c, wrapMode: false }));
+      return;
+    }
+    
+    // STEP 1 & 2: Enter wrap mode
+    updateActive((cc) => {
+      let fragments = (cc.fragments && cc.fragments.length) ? [...cc.fragments] : [];
+      
+      // Preserve the existing tracked curve EXACTLY, as a locked fragment.
+      if (!fragments.length && cc.points && cc.points.length > 1) {
+        fragments = [{
+          id: `frag-${Date.now()}-0`,
+          points: cc.points.map(p => [...p]), // verbatim copy
+          anchors: (cc.anchors || []).map(p => [...p]), // keep few user anchors
+          segments: cc.segments || [],
+          confidence: cc.confidence ?? null,
+          wrapLevel: 0,
+          edgeIn: null, edgeOut: null,
+          wrapLevelManual: false,
+          locked: true,
+        }];
+      }
+
+      // Start a FRESH, EMPTY piece and make it the active one.
+      const fresh = {
+        id: `frag-${Date.now()}-1`,
+        points: [],
+        anchors: [],
+        segments: [],
+        confidence: null,
+        wrapLevel: 0,
+        edgeIn: null, edgeOut: null,
+        wrapLevelManual: false,
+        locked: false,
+      };
+      fragments = [...fragments, fresh];
+
+      return {
+        ...cc,
+        wrapMode: true,
+        fragments,
+        activeFragmentId: fresh.id,
+        // clear legacy path
+        points: [],
+        anchors: [],
+      };
+    });
+  };
+
+
   /* ---------------- mouse interaction ---------------- */
   const ANCHOR_HIT_RADIUS = 10;
 
   const findAnchorAt = (x, y) => {
     for (const c of curves) {
-      for (let i = 0; i < c.anchors.length; i++) {
-        const [ax, ay] = c.anchors[i];
-        if ((ax - x) ** 2 + (ay - y) ** 2 <= ANCHOR_HIT_RADIUS ** 2) {
-          return { curveId: c.id, anchorIdx: i };
+      if (c.wrapMode) {
+        for (const f of c.fragments) {
+          for (let i = 0; i < f.anchors.length; i++) {
+            const [ax, ay] = f.anchors[i];
+            if ((ax - x) ** 2 + (ay - y) ** 2 <= ANCHOR_HIT_RADIUS ** 2) {
+              return { curveId: c.id, fragmentId: f.id, anchorIdx: i };
+            }
+          }
+        }
+      } else {
+        for (let i = 0; i < c.anchors.length; i++) {
+          const [ax, ay] = c.anchors[i];
+          if ((ax - x) ** 2 + (ay - y) ** 2 <= ANCHOR_HIT_RADIUS ** 2) {
+            return { curveId: c.id, anchorIdx: i };
+          }
         }
       }
     }
@@ -154,6 +320,14 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
   };
 
   const handleMouseDown = (e) => {
+    if (e.button === 2) { e.preventDefault(); return; }
+
+    if (panMode) {
+      setIsPanning(true);
+      panStart.current = { x: e.clientX, y: e.clientY };
+      return;
+    }
+
     const [x, y] = canvasCoords(e);
     const hit = findAnchorAt(x, y);
 
@@ -161,33 +335,43 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
     if (hit && (e.altKey || e.button === 2)) {
       e.preventDefault();
       pushHistory();
-      const targetCurve = curves.find(c => c.id === hit.curveId);
-      const updatedCurve = {
-        ...targetCurve,
-        anchors: targetCurve.anchors.filter((_, i) => i !== hit.anchorIdx),
-      };
       
-      if (updatedCurve.anchors.length >= 2) {
+      const targetCurve = curves.find(c => c.id === hit.curveId);
+      const isWrap = targetCurve.wrapMode;
+      const tAnchors = isWrap ? targetCurve.fragments.find(f => f.id === hit.fragmentId).anchors : targetCurve.anchors;
+
+      const newAnchors = tAnchors.filter((_, i) => i !== hit.anchorIdx);
+      const updatedCurve = isWrap ? {
+        ...targetCurve,
+        fragments: targetCurve.fragments.map(f => f.id === hit.fragmentId ? { ...f, anchors: newAnchors } : f)
+      } : { ...targetCurve, anchors: newAnchors };
+
+      if (newAnchors.length >= 2) {
         setCurves(prev => prev.map(c => c.id !== hit.curveId ? c : updatedCurve));
         handleTrackCurve(updatedCurve);
       } else {
-        const clearedCurve = { ...updatedCurve, points: [], segments: [], confidence: null };
+        const clearedCurve = isWrap ? {
+          ...updatedCurve, fragments: updatedCurve.fragments.map(f => f.id === hit.fragmentId ? { ...f, points: [], segments: [], confidence: null } : f)
+        } : { ...updatedCurve, points: [], segments: [], confidence: null };
         setCurves(prev => prev.map(c => c.id !== hit.curveId ? c : clearedCurve));
       }
       return;
     }
-    if (hit) { setDragging(hit); setActiveId(hit.curveId); return; }
-    if (e.button === 2) return;
+    if (hit) { 
+      setDragging(hit); 
+      setActiveId(hit.curveId);
+      if (hit.fragmentId) {
+        setCurves(prev => prev.map(c => c.id === hit.curveId ? { ...c, activeFragmentId: hit.fragmentId } : c));
+      }
+      return; 
+    }
 
-    // plain click -> add an anchor to the active curve
-    pushHistory();
-    const [sx, sy] = snapToDarkestPixel(x, y, 15);
-    const updatedCurve = { ...activeCurve, anchors: [...activeCurve.anchors, [sx, sy]] };
-    updateActive(() => updatedCurve);
-    if (updatedCurve.anchors.length >= 2) handleTrackCurve(updatedCurve);
+    // Neither panMode nor hit -> potential click OR pan!
+    panStart.current = { x: e.clientX, y: e.clientY, isPotentialClick: true };
   };
 
   const handleMouseMove = (e) => {
+    if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const sx = canvasRef.current.width / rect.width;
     const sy = canvasRef.current.height / rect.height;
@@ -196,31 +380,127 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
       y: (e.clientY - rect.top) * sy,
       rawX: e.clientX, rawY: e.clientY,
     });
+
+    if (panStart.current?.isPotentialClick) {
+      const dx = e.clientX - panStart.current.x;
+      const dy = e.clientY - panStart.current.y;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        setIsPanning(true);
+        panStart.current = { x: e.clientX, y: e.clientY, isPotentialClick: false };
+      }
+    }
+
+    // Pan mode or dynamically triggered pan from Place mode
+    if (panStart.current && !panStart.current.isPotentialClick) {
+      const dx = e.clientX - panStart.current.x;
+      const dy = e.clientY - panStart.current.y;
+      setPanOffset(p => ({ x: p.x + dx, y: p.y + dy }));
+      panStart.current = { x: e.clientX, y: e.clientY, isPotentialClick: false };
+      return;
+    }
+
     if (dragging) {
       const [x, y] = canvasCoords(e);
-      setCurves(prev => prev.map(c => c.id !== dragging.curveId ? c : {
-        ...c,
-        anchors: c.anchors.map((p, i) => (i === dragging.anchorIdx ? [x, y] : p)),
+      setCurves(prev => prev.map(c => {
+        if (c.id !== dragging.curveId) return c;
+        if (c.wrapMode) {
+          return {
+            ...c,
+            fragments: c.fragments.map(f => f.id !== dragging.fragmentId ? f : {
+              ...f,
+              anchors: f.anchors.map((p, i) => i === dragging.anchorIdx ? [x, y] : p)
+            })
+          };
+        }
+        return {
+          ...c,
+          anchors: c.anchors.map((p, i) => (i === dragging.anchorIdx ? [x, y] : p)),
+        };
       }));
     }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e) => {
+    if (isPanning) {
+      setIsPanning(false);
+      panStart.current = null;
+      return;
+    }
+
+    if (panStart.current?.isPotentialClick) {
+      // It was a pure click! Place the anchor!
+      const [x, y] = canvasCoords({ clientX: panStart.current.x, clientY: panStart.current.y });
+      pushHistory();
+      // Dashed curves: use a wider snap radius so a click in a gap still finds the nearest dash.
+      const snapRadius = activeCurve.style === 'dashed' ? 30 : 15;
+      const [sx, sy] = snapToDarkestPixel(x, y, snapRadius);
+      
+      let updatedCurve;
+      if (activeCurve.wrapMode) {
+        updatedCurve = {
+          ...activeCurve,
+          fragments: activeCurve.fragments.map(f => (f.id === activeCurve.activeFragmentId && !f.locked) ? {
+            ...f, anchors: [...f.anchors, [sx, sy]]
+          } : f)
+        };
+      } else {
+        updatedCurve = { ...activeCurve, anchors: [...activeCurve.anchors, [sx, sy]] };
+      }
+      
+      updateActive(() => updatedCurve);
+      
+      const tAnchors = activeCurve.wrapMode ? updatedCurve.fragments.find(f => f.id === updatedCurve.activeFragmentId).anchors : updatedCurve.anchors;
+      if (tAnchors.length >= 2) handleTrackCurve(updatedCurve);
+
+      panStart.current = null;
+      return;
+    }
+
     if (dragging) {
-      // snap the dropped anchor
       const targetCurve = curves.find(c => c.id === dragging.curveId);
       if (targetCurve) {
-        const updatedCurve = {
-          ...targetCurve,
-          anchors: targetCurve.anchors.map((p, i) =>
-            i === dragging.anchorIdx ? snapToDarkestPixel(p[0], p[1], 15) : p),
-        };
+        const dragSnapRadius = targetCurve.style === 'dashed' ? 30 : 15;
+        let updatedCurve;
+        if (targetCurve.wrapMode) {
+          updatedCurve = {
+            ...targetCurve,
+            fragments: targetCurve.fragments.map(f => f.id !== dragging.fragmentId ? f : {
+              ...f,
+              anchors: f.anchors.map((p, i) => i === dragging.anchorIdx ? snapToDarkestPixel(p[0], p[1], dragSnapRadius) : p)
+            })
+          };
+        } else {
+          updatedCurve = {
+            ...targetCurve,
+            anchors: targetCurve.anchors.map((p, i) =>
+              i === dragging.anchorIdx ? snapToDarkestPixel(p[0], p[1], dragSnapRadius) : p),
+          };
+        }
         setCurves(prev => prev.map(c => c.id !== dragging.curveId ? c : updatedCurve));
-        if (updatedCurve.anchors.length >= 2) handleTrackCurve(updatedCurve);
+        const tAnchors = updatedCurve.wrapMode ? updatedCurve.fragments.find(f => f.id === dragging.fragmentId).anchors : updatedCurve.anchors;
+        if (tAnchors.length >= 2) handleTrackCurve(updatedCurve);
       }
       setDragging(null);
     }
   };
+
+  const handleWheel = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (panMode || e.ctrlKey || e.metaKey) {
+      const delta = e.deltaY < 0 ? 0.12 : -0.12;
+      setZoom(z => Math.max(0.15, Math.min(5, z + delta)));
+    } else {
+      setPanOffset(p => ({ x: p.x - e.deltaX, y: p.y - e.deltaY }));
+    }
+  }, [setZoom, setPanOffset, panMode]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
 
   /* ---------------- undo ---------------- */
   useEffect(() => {
@@ -248,55 +528,121 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
     ctx.drawImage(imageRef.current, 0, 0);
 
     for (const c of curves) {
-      // traced path - low-confidence segments in amber dashes
-      if (c.points.length > 1) {
-        const lowConfRanges = (c.segments || [])
-          .filter(s => s.confidence < 0.55)
-          .map(s => [Math.min(s.from[1], s.to[1]), Math.max(s.from[1], s.to[1])]);
-        const isLowConf = (y) => lowConfRanges.some(([a, b]) => y >= a && y <= b);
+      const isActive = c.id === activeId;
+      const displayStyle = c.detected_style || c.style;
+      const dash = displayStyle === 'dashed' ? [6, 4] : [];
 
-        let runLow = isLowConf(c.points[0][1]);
-        let start = 0;
-        const drawRun = (from, to, low) => {
+      // 1) NORMAL traced path — ALWAYS draw if present.
+      if (c.points && c.points.length > 1) {
+        ctx.beginPath();
+        ctx.moveTo(c.points[0][0], c.points[0][1]);
+        for (let i = 1; i < c.points.length; i++) ctx.lineTo(c.points[i][0], c.points[i][1]);
+        ctx.strokeStyle = c.color;
+        ctx.setLineDash(dash);
+        ctx.globalAlpha = c.wrapMode ? 0.25 : 1.0;
+        ctx.lineWidth = isActive ? 5.0 : 3.0;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1.0;
+      }
+
+      // Highlight needs_anchor segments if NOT in wrapMode
+      if (!c.wrapMode && c.segments && c.id === activeId) {
+        c.segments.forEach(seg => {
+          if (seg.needs_anchor) {
+            const segPts = c.points.filter(p => p[1] >= seg.from[1] && p[1] <= seg.to[1]);
+            if (segPts.length > 1) {
+              ctx.beginPath();
+              ctx.moveTo(segPts[0][0], segPts[0][1]);
+              for (let i = 1; i < segPts.length; i++) ctx.lineTo(segPts[i][0], segPts[i][1]);
+              ctx.strokeStyle = '#f59e0b';
+              ctx.setLineDash([4, 4]);
+              ctx.lineWidth = 3.0;
+              ctx.stroke();
+              ctx.setLineDash([]);
+            }
+            if (seg.worst_pt) {
+              const [wx, wy] = seg.worst_pt;
+              ctx.beginPath();
+              ctx.arc(wx, wy, 6, 0, 2 * Math.PI);
+              ctx.fillStyle = '#fef3c7';
+              ctx.fill();
+              ctx.strokeStyle = '#f59e0b';
+              ctx.lineWidth = 2;
+              ctx.stroke();
+              ctx.beginPath();
+              ctx.moveTo(wx - 3, wy); ctx.lineTo(wx + 3, wy);
+              ctx.moveTo(wx, wy - 3); ctx.lineTo(wx, wy + 3);
+              ctx.strokeStyle = '#d97706';
+              ctx.lineWidth = 1.5;
+              ctx.stroke();
+            }
+          }
+        });
+      }
+
+      // 2) FRAGMENTS — ALWAYS draw if present, each as its OWN path
+      if (c.fragments && c.fragments.length) {
+        c.fragments.forEach(frag => {
+          if (!frag.points || frag.points.length < 2) return;
+          const isActiveFrag = isActive && frag.id === c.activeFragmentId;
           ctx.beginPath();
-          ctx.moveTo(c.points[from][0], c.points[from][1]);
-          for (let i = from + 1; i <= to; i++) ctx.lineTo(c.points[i][0], c.points[i][1]);
-          ctx.strokeStyle = low ? '#F59E0B' : c.color;
-          ctx.setLineDash(low ? [6, 4] : []);
-          ctx.lineWidth = c.id === activeId ? 5.0 : 3.0;
+          ctx.moveTo(frag.points[0][0], frag.points[0][1]);
+          for (let i = 1; i < frag.points.length; i++) ctx.lineTo(frag.points[i][0], frag.points[i][1]);
+          ctx.strokeStyle = c.color;
+          ctx.setLineDash(dash);
+          ctx.globalAlpha = frag.locked ? 0.8 : 1.0;
+          ctx.lineWidth = isActiveFrag ? 5.5 : (isActive ? 4.0 : 3.0);
           ctx.stroke();
           ctx.setLineDash([]);
-        };
-        for (let i = 1; i < c.points.length; i++) {
-          const low = isLowConf(c.points[i][1]);
-          if (low !== runLow) { drawRun(start, i, runLow); start = i; runLow = low; }
-        }
-        drawRun(start, c.points.length - 1, runLow);
+          ctx.globalAlpha = 1.0;
+          // wrap-level tag
+          const [tx, ty] = frag.points[0];
+          ctx.fillStyle = c.color;
+          ctx.font = 'bold 11px sans-serif';
+          ctx.fillText(`L${frag.wrapLevel > 0 ? '+' : ''}${frag.wrapLevel}`, tx + 6, ty + 4);
+        });
       }
-      // anchors
-      c.anchors.forEach((p, idx) => {
+
+      // 3) ANCHORS — show the anchors of the thing currently being edited.
+      const strokeAnchor = (p, idx, big) => {
         ctx.beginPath();
-        ctx.arc(p[0], p[1], c.id === activeId ? 5 : 4, 0, 2 * Math.PI);
-        ctx.fillStyle = c.color;
-        ctx.fill();
-        ctx.strokeStyle = 'white';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        if (c.id === activeId) {
-          ctx.fillStyle = '#111';
-          ctx.font = '10px sans-serif';
+        ctx.arc(p[0], p[1], big ? 5 : 4, 0, 2 * Math.PI);
+        ctx.fillStyle = c.color; ctx.fill();
+        ctx.strokeStyle = 'white'; ctx.lineWidth = 1.5; ctx.stroke();
+        if (big) {
+          ctx.fillStyle = '#111'; ctx.font = '10px sans-serif';
           ctx.fillText(String(idx + 1), p[0] + 7, p[1] - 7);
         }
-      });
+      };
+      
+      if (c.wrapMode && c.fragments && c.fragments.length) {
+        c.fragments.forEach(frag => {
+          (frag.anchors || []).forEach((p, idx) =>
+            strokeAnchor(p, idx, isActive && frag.id === c.activeFragmentId)
+          );
+        });
+      } else {
+        (c.anchors || []).forEach((p, idx) => strokeAnchor(p, idx, isActive));
+      }
     }
   }, [curves, activeId]);
   redrawRef.current = redraw;
   useEffect(() => { redraw(); }, [redraw]);
 
+
   /* ---------------- AI tracking ---------------- */
   const handleTrackCurve = async (curveOverride) => {
     const c = curveOverride && curveOverride.id ? curveOverride : activeCurve;
-    if (!c || c.anchors.length < 2) return;
+    const isWrap = c.wrapMode;
+      const activeFrag = isWrap ? c.fragments.find(f => f.id === c.activeFragmentId) : null;
+      if (isWrap && (!activeFrag || activeFrag.locked)) {
+        setTracking(false);
+        return;
+      }
+      const targetAnchors = isWrap ? activeFrag?.anchors : c.anchors;
+    
+    if (!targetAnchors || targetAnchors.length < 2) return;
     setTracking(true);
     setError(null);
     try {
@@ -305,8 +651,15 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
       const name = blob.type.includes('tiff') ? 'image.tif'
         : blob.type.includes('jpeg') ? 'image.jpg' : 'image.png';
       form.append('file', blob, name);
-      form.append('points', JSON.stringify(c.anchors));
-      form.append('curve_style', c.style || 'solid');
+      form.append('points', JSON.stringify(targetAnchors));
+      form.append('curve_style', c.style || 'auto');
+      
+      const [trackLeft, trackRight] = getActiveTrackBounds(targetAnchors);
+      if (isWrap) {
+        form.append('corridor_pad', 40);
+        if (trackLeft >= 0) form.append('x_min', Math.round(trackLeft));
+        if (trackRight >= 0) form.append('x_max', Math.round(trackRight));
+      }
 
       const res = await fetch(endpoint, { method: 'POST', body: form });
       if (!res.ok) {
@@ -314,31 +667,54 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
         throw new Error(detail.detail || `Server returned ${res.status}`);
       }
       const data = await res.json();
-      const tracked = {
-        ...c,
-        points: data.points,
-        segments: data.segments,
-        confidence: data.confidence,
-        anchors: data.snapped_anchors || c.anchors,
-        source: 'ai',
-        isSaved: false, // Reset saved flag because the curve has been updated
-      };
-      setCurves(prev => prev.map(cu => (cu.id === c.id ? tracked : cu)));
-      if (onCurveTracked) {
-        onCurveTracked(curves.map(cu => (cu.id === c.id ? tracked : cu)));
+      
+      if (isWrap) {
+        const updatedFrag = {
+          ...activeFrag,
+          points: data.points,
+          segments: data.segments,
+          confidence: data.confidence,
+          anchors: data.snapped_anchors || activeFrag.anchors,
+          edgeIn: data.edge_in,
+          edgeOut: data.edge_out
+        };
+        const updatedC = recomputeWrapLevels({
+          ...c,
+          fragments: c.fragments.map(f => f.id === activeFrag.id ? updatedFrag : f),
+          source: 'ai',
+          isSaved: false
+        }, trackLeft, trackRight);
+        setCurves(prev => prev.map(cu => cu.id === c.id ? updatedC : cu));
+      } else {
+        const tracked = {
+          ...c,
+          points: data.points,
+          segments: data.segments,
+          confidence: data.confidence,
+          anchors: data.snapped_anchors || c.anchors,
+          source: 'ai',
+          isSaved: false,
+          detected_style: data.detected_style
+        };
+        setCurves(prev => prev.map(cu => (cu.id === c.id ? tracked : cu)));
       }
     } catch (err) {
-      // Backend unreachable -> spline fallback so the user is never blocked
-      const sorted = [...c.anchors].sort((a, b) => a[1] - b[1]);
-      const spline = catmullRomSpline(sorted, 50);
-      updateActive(cur => ({
-        ...cur, points: spline, segments: [], confidence: null, source: 'fallback',
-      }));
-      setError(`AI tracking unavailable (${err.message}). Drew a spline through your points instead - start the Python backend for real pixel tracking.`);
+      if (isWrap) {
+        setCurves(prev => prev.map(cu => cu.id === c.id ? {
+          ...cu, fragments: cu.fragments.map(f => f.id === activeFrag.id ? { ...f, points: [], confidence: null } : f), source: 'fallback'
+        } : cu));
+      } else {
+        setCurves(prev => prev.map(cu => (cu.id === c.id ? {
+          ...cu, points: [], segments: [], confidence: null, source: 'fallback'
+        } : cu)));
+      }
+      setError(`AI tracking unavailable (${err.message}).`);
     } finally {
       setTracking(false);
     }
   };
+
+
 
   /* ---------------- curve management ---------------- */
   const addCurve = () => {
@@ -357,134 +733,268 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
   };
   const clearActive = () => {
     pushHistory();
-    updateActive(c => ({ ...c, anchors: [], points: [], segments: [], confidence: null }));
+    updateActive(c => ({ ...c, anchors: [], points: [], segments: [], confidence: null, fragments: [] }));
   };
 
   const lowConfCount = (activeCurve?.segments || []).filter(s => s.confidence < 0.55).length;
 
+  /* close color picker on outside click */
+  useEffect(() => {
+    const close = () => setColorPickerOpen(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, []);
+
+
+
   return (
-    <div className="flex flex-col gap-3 p-4 bg-white rounded-lg shadow-sm border border-gray-200">
-      {/* header */}
-      <div className="flex justify-between items-start flex-wrap gap-2">
-        <div>
-          <h3 className="font-semibold text-gray-800 text-lg">Human-Guided AI Tracking</h3>
-          <p className="text-sm text-gray-500">
-            Click a few points along one curve, then press <b>AI Track</b>. The AI learns the
-            curve's color from your clicks and traces the real curve pixels between them.
-            Drag anchors to move - Alt+click to delete - Ctrl+Z to undo.
-          </p>
-        </div>
-        <div className="flex gap-2">
+    <div className="flex flex-col flex-1 min-h-0 bg-gray-100">
+
+      {/* ── TOP TOOLBAR (3-column grid for centered title) ─────────────────── */}
+      <div className="h-10 bg-white border-b border-gray-200 grid grid-cols-3 items-center px-3 shrink-0">
+
+        {/* LEFT: Actions */}
+        <div className="flex items-center gap-1.5 justify-start">
           <button onClick={clearActive}
-            className="px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded text-gray-700 font-medium">
-            Clear Curve
+            className="px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded text-gray-700 font-medium transition-colors">
+            🗑️ Clear
           </button>
           <button
-            onClick={handleTrackCurve}
-            disabled={tracking || (activeCurve?.anchors.length || 0) < 2}
-            className={`px-4 py-2 text-sm rounded font-medium flex items-center gap-2 ${
-              !tracking && (activeCurve?.anchors.length || 0) >= 2
-                ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+            onClick={toggleWrapMode}
+            title="Track a curve that runs off one edge and continues on the opposite edge"
+            className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded border transition-all ${
+              activeCurve?.wrapMode
+                ? 'bg-amber-50 border-amber-300 text-amber-700'
+                : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
             }`}>
-            {tracking ? 'Tracing…' : '🪄 AI Track'}
+            <span>↩️</span> {activeCurve?.wrapMode ? 'Wrapping: ON' : 'Wrapping'}
           </button>
+          
+          <button
+            onClick={handleTrackCurve}
+            disabled={tracking || (activeCurve?.wrapMode ? (activeCurve.fragments.find(f => f.id === activeCurve.activeFragmentId)?.anchors.length || 0) < 2 : (activeCurve?.anchors.length || 0) < 2)}
+            className={`px-2.5 py-1 text-xs rounded font-medium flex items-center gap-1 transition-colors ${
+              !tracking && (activeCurve?.wrapMode ? (activeCurve.fragments.find(f => f.id === activeCurve.activeFragmentId)?.anchors.length || 0) >= 2 : (activeCurve?.anchors.length || 0) >= 2)
+                ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+            }`}>
+            {tracking ? '⏳' : '🪄'} {activeCurve?.wrapMode ? (tracking ? 'Tracing Fragment…' : 'Track Fragment') : (tracking ? 'Tracing…' : 'AI Track')}
+          </button>
+          
+          {activeCurve?.wrapMode && (
+            <button
+              onClick={() => {
+                const newFragId = `frag-${Date.now()}`;
+                updateActive(c => {
+                  const lastLevel = c.fragments.length ? c.fragments[c.fragments.length - 1].wrapLevel : 0;
+                  return {
+                    ...c,
+                    fragments: [...c.fragments, {
+                      id: newFragId,
+                      points: [], anchors: [], segments: [], confidence: null,
+                      wrapLevel: lastLevel, edgeIn: null, edgeOut: null, wrapLevelManual: false,
+                      locked: false,
+                    }],
+                    activeFragmentId: newFragId
+                  };
+                });
+              }}
+              className="px-2.5 py-1 text-xs rounded font-medium bg-amber-100 hover:bg-amber-200 text-amber-800 transition-colors">
+              + Next Piece
+            </button>
+          )}
+
           <button
             onClick={() => {
               if (onSave) {
-                // only pass curves that have actual traced points and haven't been saved yet
-                const unsavedCurves = curves.filter(c => c.points && c.points.length > 0 && !c.isSaved);
+                const isWrap = c => c.wrapMode && c.fragments.some(f => f.points && f.points.length > 0);
+                const isNormal = c => !c.wrapMode && c.points && c.points.length > 0;
+                const unsavedCurves = curves.filter(c => (isWrap(c) || isNormal(c)) && !c.isSaved);
                 if (unsavedCurves.length > 0) {
-                  onSave(unsavedCurves.map(c => c.points));
-                  // Mark them as saved so they aren't duplicated next time
-                  setCurves(prev => prev.map(c => 
-                    (c.points && c.points.length > 0) ? { ...c, isSaved: true } : c
+                  onSave(unsavedCurves);
+                  setCurves(prev => prev.map(c =>
+                    (isWrap(c) || isNormal(c)) ? { ...c, isSaved: true } : c
                   ));
                 } else {
-                  // If everything is already saved, just return to the main view
                   onSave([]);
                 }
               }
             }}
-            disabled={!curves.some(c => c.points && c.points.length > 0)}
-            className={`px-4 py-2 text-sm rounded font-medium flex items-center gap-2 ${
-              curves.some(c => c.points && c.points.length > 0)
+            disabled={!curves.some(c => c.wrapMode ? c.fragments.some(f => f.points && f.points.length > 0) : c.points && c.points.length > 0)}
+            className={`px-2.5 py-1 text-xs rounded font-medium flex items-center gap-1 transition-colors ${
+              curves.some(c => c.wrapMode ? c.fragments.some(f => f.points && f.points.length > 0) : c.points && c.points.length > 0)
                 ? 'bg-green-600 hover:bg-green-700 text-white'
-                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                : 'bg-gray-200 text-gray-400 cursor-not-allowed'
             }`}>
-            💾 Save & Return to Main View
+            💾 Save &amp; Return
           </button>
+        </div>
+
+        {/* CENTER: Title */}
+        <div className="flex items-center justify-center">
+          <span className="text-xs font-bold text-gray-800 tracking-wide uppercase">🎯 Guided Tracking</span>
+        </div>
+
+        {/* RIGHT: Pan & Zoom */}
+        <div className="flex items-center gap-2 justify-end">
+          <button onClick={() => setPanMode(p => !p)}
+            title={panMode ? 'Switch to Place Anchor mode' : 'Switch to Pan mode'}
+            className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded border transition-colors ${
+              panMode ? 'bg-blue-50 border-blue-300 text-blue-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}>
+            {panMode ? '🖐️ Pan' : '📍 Place'}
+          </button>
+          <div className="flex items-center bg-gray-50 border border-gray-200 rounded divide-x divide-gray-200 text-xs">
+            <button onClick={() => setZoom(z => Math.max(0.2, z - 0.2))} className="px-1.5 py-1 text-gray-600 hover:bg-gray-100">🔍−</button>
+            <span className="px-2 py-1 font-semibold text-gray-700 w-12 text-center">{Math.round(zoom * 100)}%</span>
+            <button onClick={() => setZoom(z => Math.min(5, z + 0.2))} className="px-1.5 py-1 text-gray-600 hover:bg-gray-100">🔍+</button>
+            <button onClick={() => setZoom(1)} className="px-1.5 py-1 text-gray-600 hover:bg-gray-100">🔄</button>
+          </div>
         </div>
       </div>
 
-      {/* curve tabs */}
-      <div className="flex items-center gap-2 flex-wrap">
+      {/* ── CURVE TABS (Sub-header) ────────────────────────────────────────── */}
+      <div className="flex items-center px-3 py-2 bg-white border-b border-gray-200 gap-2 shrink-0 flex-wrap">
         {curves.map(c => (
           <div key={c.id}
             onClick={() => setActiveId(c.id)}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm cursor-pointer border ${
-              c.id === activeId ? 'border-gray-800 bg-gray-50 font-medium' : 'border-gray-200 text-gray-600'
+            className={`relative flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs cursor-pointer border transition-all shrink-0 ${
+              c.id === activeId ? 'border-blue-400 bg-blue-50 font-medium' : 'border-gray-200 text-gray-500 hover:border-gray-300'
             }`}>
-            <span className="w-3 h-3 rounded-full" style={{ background: c.color }} />
-            {c.name}
-            <select
-              value={c.style || 'solid'}
-              onChange={(e) => {
+            {/* color dot */}
+            <button
+              onClick={e => { e.stopPropagation(); setColorPickerOpen(prev => prev === c.id ? null : c.id); }}
+              className="w-3.5 h-3.5 rounded-full border border-white shadow ring-1 ring-gray-300 hover:scale-125 transition-transform flex-shrink-0"
+              style={{ background: c.color }} title="Change color" />
+            {/* Color Picker */}
+            {colorPickerOpen === c.id && (
+              <div onClick={e => e.stopPropagation()}
+                className="absolute top-full left-0 mt-2 z-50 bg-white border border-gray-200 rounded-xl shadow-xl p-3 min-w-[200px]">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Choose Color</p>
+                <div className="grid grid-cols-5 gap-2">
+                  {CURVE_COLORS.map((col, i) => (
+                    <button key={col} title={COLOR_NAMES[i]}
+                      onClick={() => { setCurves(prev => prev.map(cu => cu.id === c.id ? { ...cu, color: col } : cu)); setColorPickerOpen(null); }}
+                      className={`w-7 h-7 rounded-full border-2 transition-transform hover:scale-110 ${c.color === col ? 'border-gray-800 scale-110' : 'border-white shadow'}`}
+                      style={{ background: col }} />
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Name */}
+            {editingCurveId === c.id ? (
+              <input autoFocus value={c.name}
+                onChange={e => setCurves(prev => prev.map(cu => cu.id === c.id ? { ...cu, name: e.target.value } : cu))}
+                onBlur={() => setEditingCurveId(null)}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') setEditingCurveId(null); }}
+                onClick={e => e.stopPropagation()}
+                className="w-14 bg-transparent border-b border-blue-400 outline-none text-xs font-medium text-gray-800 px-0.5" />
+            ) : (
+              <span onDoubleClick={e => { e.stopPropagation(); setEditingCurveId(c.id); }}
+                title="Double-click to rename"
+                className="text-xs font-medium text-gray-700 cursor-text select-none">{c.name}</span>
+            )}
+            <select value={c.style || 'auto'}
+              onChange={e => {
                 e.stopPropagation();
-                setCurves(prev => prev.map(cu => cu.id === c.id ? { ...cu, style: e.target.value } : cu));
+                const newStyle = e.target.value;
+                const updatedC = { ...c, style: newStyle };
+                setCurves(prev => prev.map(cu => cu.id === c.id ? updatedC : cu));
+                if (updatedC.anchors.length >= 2) handleTrackCurve(updatedC);
               }}
-              className="ml-1 bg-white border border-gray-300 text-gray-700 text-xs rounded px-1 py-0.5 outline-none cursor-pointer"
-            >
+              className="bg-white border border-gray-200 text-gray-500 text-[10px] rounded px-0.5 outline-none cursor-pointer">
+              <option value="auto">Auto</option>
               <option value="solid">Solid</option>
               <option value="dashed">Dashed</option>
             </select>
-            <span className="text-xs text-gray-400">{c.anchors.length} pts</span>
+            <span className="text-[10px] text-gray-400">{c.wrapMode ? `${c.fragments.length} frags` : `${c.anchors.length}pt`}</span>
             {c.confidence != null && (
-              <span className={`text-xs ${c.confidence > 0.7 ? 'text-green-600' : 'text-amber-600'}`}>
+              <span className={`text-[10px] font-semibold ${c.confidence > 0.7 ? 'text-green-600' : 'text-amber-600'}`}>
                 {(c.confidence * 100).toFixed(0)}%
               </span>
             )}
             {curves.length > 1 && (
-              <button onClick={(e) => { e.stopPropagation(); removeCurve(c.id); }}
-                className="text-gray-400 hover:text-red-500">×</button>
+              <button onClick={e => { e.stopPropagation(); removeCurve(c.id); }}
+                className="text-gray-300 hover:text-red-500 font-bold">×</button>
             )}
           </div>
         ))}
         <button onClick={addCurve}
-          className="px-3 py-1.5 text-sm rounded-full border border-dashed border-gray-300 text-gray-500 hover:border-gray-500">
-          + New Curve
+          className="px-2 py-1 text-[10px] rounded-full border border-dashed border-gray-300 text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors shrink-0">
+          + New
         </button>
 
-        <div className="flex-1" />
-
-        {/* Zoom Controls */}
-        <div className="flex items-center bg-gray-50 border border-gray-200 rounded divide-x divide-gray-200 text-xs">
-          <button onClick={() => setZoom(z => Math.max(0.2, z - 0.2))} className="px-2 py-1 text-gray-600 hover:bg-gray-100">− Zoom Out</button>
-          <span className="px-2 py-1 font-semibold text-gray-700">{Math.round(zoom * 100)}%</span>
-          <button onClick={() => setZoom(z => Math.min(5, z + 0.2))} className="px-2 py-1 text-gray-600 hover:bg-gray-100">+ Zoom In</button>
-          <button onClick={() => setZoom(1)} className="px-2 py-1 text-gray-600 hover:bg-gray-100">Reset</button>
-        </div>
       </div>
 
-      {/* canvas */}
+      {/* ── WRAP MODE BANNER & FRAGMENTS ────────────────────────────────────── */}
+      {activeCurve?.wrapMode && (
+        <div className="bg-amber-50 border-b border-amber-200 px-3 py-2 flex flex-col gap-2 shrink-0">
+          <p className="text-amber-800 text-[10px] font-medium leading-tight">
+            <strong>Wrapping Mode ON:</strong> Click anchors along ONE visible piece of the curve, then press <strong>Track Fragment</strong>. Then click <strong>+ Next Piece</strong> and repeat for each wrapped piece.
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            {activeCurve.fragments.map((f, i) => (
+              <div key={f.id} 
+                onClick={() => updateActive(c => ({ ...c, activeFragmentId: f.id }))}
+                className={`flex items-center gap-1.5 px-2 py-1 rounded text-[10px] border cursor-pointer transition-colors ${f.id === activeCurve.activeFragmentId ? 'bg-amber-200 border-amber-400 font-bold' : 'bg-white border-amber-200 hover:bg-amber-100'}`}>
+                <span>Piece {i+1} (L{f.wrapLevel > 0 ? '+' : ''}{f.wrapLevel})</span>
+                <div className="flex items-center gap-0.5 bg-white/80 rounded px-0.5 border border-amber-300">
+                  <button onClick={e => {
+                    e.stopPropagation();
+                    updateActive(c => {
+                      const [tL, tR] = getActiveTrackBounds(
+                        c.fragments.flatMap(fr => fr.points || []).filter(Boolean)
+                      );
+                      const updated = {
+                        ...c,
+                        fragments: c.fragments.map(fr => fr.id === f.id ? { ...fr, wrapLevel: fr.wrapLevel - 1, wrapLevelManual: true } : fr)
+                      };
+                      return recomputeWrapLevels(updated, tL, tR);
+                    });
+                  }} className="hover:text-amber-700 px-0.5 font-bold">−</button>
+                  <button onClick={e => {
+                    e.stopPropagation();
+                    updateActive(c => {
+                      const [tL, tR] = getActiveTrackBounds(
+                        c.fragments.flatMap(fr => fr.points || []).filter(Boolean)
+                      );
+                      const updated = {
+                        ...c,
+                        fragments: c.fragments.map(fr => fr.id === f.id ? { ...fr, wrapLevel: fr.wrapLevel + 1, wrapLevelManual: true } : fr)
+                      };
+                      return recomputeWrapLevels(updated, tL, tR);
+                    });
+                  }} className="hover:text-amber-700 px-0.5 font-bold">+</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── CANVAS (fills remaining space like graph view) ──────────────────── */}
       <div ref={containerRef}
-        className="relative overflow-auto border border-gray-300 rounded cursor-crosshair max-h-[700px] w-full bg-gray-100">
-        <div style={{ width: canvasRef.current?.width * zoom || '100%', height: canvasRef.current?.height * zoom || '100%' }}>
+        className={`flex-1 min-h-0 relative overflow-hidden bg-gray-100 select-none ${
+          panMode ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-crosshair'
+        }`}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={() => { setMousePos(null); handleMouseUp(); }}>
+        <div style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px)`, width: '100%', height: '100%' }}>
           <canvas
             ref={canvasRef}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
             onMouseLeave={() => { setMousePos(null); handleMouseUp(); }}
-            onContextMenu={(e) => e.preventDefault()}
-            className="max-w-none shadow-inner origin-top-left"
-            style={{ transform: `scale(${zoom})` }}
+            onContextMenu={e => e.preventDefault()}
+            className="max-w-none shadow-sm block origin-top-left"
+            style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}
           />
         </div>
-        {/* magnifying loupe */}
-        {mousePos && imageUrl && !dragging && (
-          <div
-            className="fixed pointer-events-none border-2 border-blue-500 rounded-full overflow-hidden shadow-2xl z-50 bg-white"
+        {/* loupe */}
+        {mousePos && imageUrl && !dragging && !panMode && (
+          <div className="fixed pointer-events-none border-2 border-blue-500 rounded-full overflow-hidden shadow-2xl z-50 bg-white"
             style={{
               left: mousePos.rawX + 20, top: mousePos.rawY + 20,
               width: 120, height: 120,
@@ -499,21 +1009,15 @@ const HumanGuidedCurveTracker = ({ imageUrl, onCurveTracked, onSave, apiUrl }) =
         )}
       </div>
 
-      {/* status */}
-      {error && (
-        <div className="text-xs text-amber-800 bg-amber-50 p-2 rounded border border-amber-200">
-          ⚠ {error}
-        </div>
-      )}
-      {activeCurve?.source === 'ai' && activeCurve.points.length > 0 && (
-        <div className="text-xs text-green-800 bg-green-50 p-2 rounded border border-green-200">
-          ✓ AI traced <b>{activeCurve.points.length}</b> points (one per depth row),
-          confidence <b>{(activeCurve.confidence * 100).toFixed(1)}%</b>.
-          {lowConfCount > 0 && (
-            <span className="text-amber-700">
-              {' '}{lowConfCount} segment{lowConfCount > 1 ? 's' : ''} drawn in
-              <b> amber dashes</b> look uncertain - click an extra anchor there and re-track.
-            </span>
+      {/* ── BOTTOM STATUS BAR ───────────────────────────────────────────────── */}
+      {(error || (activeCurve?.source === 'ai' && activeCurve.points.length > 0)) && (
+        <div className="shrink-0 px-3 py-1.5 border-t border-gray-200 bg-white">
+          {error && <p className="text-[10px] text-amber-700">⚠ {error}</p>}
+          {activeCurve?.source === 'ai' && activeCurve.points.length > 0 && (
+            <p className="text-[10px] text-green-700">
+              ✓ AI traced <b>{activeCurve.points.length}</b> pts · confidence <b>{(activeCurve.confidence * 100).toFixed(1)}%</b>
+              {lowConfCount > 0 && <span className="text-amber-600"> · {lowConfCount} low-confidence segment{lowConfCount > 1 ? 's' : ''} (add anchors)</span>}
+            </p>
           )}
         </div>
       )}

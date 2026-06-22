@@ -54,5 +54,5 @@ for x, y in pts:
     vis[y, max(0,x-1):x+2] = (0, 200, 0)
 for x, y in res["snapped_anchors"]:
     cv2.circle(vis, (x, y), 5, (0, 0, 255), -1)
-cv2.imwrite("/home/claude/test_trace.png", vis)
-print("saved /home/claude/test_trace.png")
+cv2.imwrite("test_trace.png", vis)
+print("saved test_trace.png")

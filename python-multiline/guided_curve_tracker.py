@@ -110,53 +110,83 @@ def _estimate_curve_style(bgr: np.ndarray, curve_lab: np.ndarray, anchors: List[
     
     ink_mask = (cost < 0.35).astype(np.uint8)
     
-    h, w = bgr.shape[:2]
-    votes_dashed = 0
+def _estimate_curve_style(bgr: np.ndarray, curve_lab: np.ndarray, anchors: List[Tuple[int, int]]) -> Tuple[bool, float]:
+    """
+    Returns (is_dashed, est_gap_px)
+    """
+    if len(anchors) < 2:
+        return False, 0.0
     
-    for x, y in anchors:
-        y0 = max(0, y - 100)
-        y1 = min(h, y + 100)
-        x0 = max(0, x - 50)
-        x1 = min(w, x + 50)
-        patch = ink_mask[y0:y1, x0:x1]
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    target_chroma = np.sqrt(curve_lab[1]**2 + curve_lab[2]**2)
+    wL, wa, wb = (2.5, 1.0, 1.0) if target_chroma < 12 else (0.3, 2.5, 2.5)
+    
+    dL = lab[:, :, 0] - curve_lab[0]
+    dL = np.where(dL < 0, dL * 0.8, dL)
+    da = lab[:, :, 1] - curve_lab[1]
+    db = lab[:, :, 2] - curve_lab[2]
+    
+    dist = np.sqrt(wL * dL * dL + wa * da * da + wb * db * db)
+    cost = np.clip(dist / 60.0, 0.0, 1.0)
+    
+    ink_mask = (cost < 0.4).astype(np.uint8)
+    
+    all_gap_runs = []
+    total_length = 0
+    dashed_length = 0
+    
+    sorted_anchors = sorted(anchors, key=lambda p: p[1])
+    
+    for i in range(len(sorted_anchors) - 1):
+        x0, y0 = sorted_anchors[i]
+        x1, y1 = sorted_anchors[i+1]
         
-        # Local coordinates of the anchor within the patch
-        lx, ly = x - x0, y - y0
+        length = int(np.hypot(x1 - x0, y1 - y0))
+        if length == 0: continue
+        total_length += length
         
-        # Find all connected components of ink in this 200x100 window
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(patch, connectivity=8)
+        line_mask = np.zeros_like(ink_mask)
+        cv2.line(line_mask, (x0, y0), (x1, y1), 1, 5) # thickness 5
         
-        if num_labels <= 1:
-            continue # No ink found
-            
-        # Find which connected component is closest to the anchor click
-        min_dist = float('inf')
-        best_label = -1
-        for i in range(1, num_labels):
-            # Check pixels belonging to this component
-            comp_ys, comp_xs = np.where(labels == i)
-            if len(comp_xs) == 0: continue
-            
-            # Distance from click to the closest pixel of this component
-            dists = (comp_xs - lx)**2 + (comp_ys - ly)**2
-            min_d = np.min(dists)
-            
-            if min_d < min_dist and min_d < 400: # must be within 20px (400 squared)
-                min_dist = min_d
-                best_label = i
-                
-        if best_label != -1:
-            # Measure the bounding box height of the ink component the user clicked on
-            _, _, _, comp_h, _ = stats[best_label]
-            
-            # If the continuous ink is less than 80 pixels tall, it's a dash!
-            if comp_h < 80:
-                votes_dashed += 1
-            
-    return votes_dashed > 0
+        ys, xs = np.where(line_mask == 1)
+        if len(ys) == 0: continue
+        
+        order = np.argsort(ys)
+        ys = ys[order]
+        xs = xs[order]
+        
+        y_unique = np.unique(ys)
+        vals = []
+        for y in y_unique:
+            row_xs = xs[ys == y]
+            vals.append(np.max(ink_mask[y, row_xs]))
+        vals = np.array(vals, dtype=int)
+        
+        padded = np.pad(vals, (1, 1), constant_values=1)
+        diffs = np.diff(padded)
+        gap_starts = np.where(diffs == -1)[0]
+        gap_ends = np.where(diffs == 1)[0]
+        
+        gaps = gap_ends - gap_starts
+        
+        valid_gaps = gaps[gaps >= 3]
+        if len(valid_gaps) > 0:
+            all_gap_runs.extend(valid_gaps)
+            if len(valid_gaps) >= 2:
+                cv = np.std(valid_gaps) / (np.mean(valid_gaps) + 1e-6)
+                if cv < 0.6 and np.median(valid_gaps) >= 4:
+                    dashed_length += length
+                    
+    if len(all_gap_runs) == 0:
+        return False, 0.0
+        
+    median_gap = float(np.median(all_gap_runs))
+    is_dashed = (median_gap >= 4) and (dashed_length / max(1, total_length) >= 0.4)
+    
+    return is_dashed, median_gap if is_dashed else 0.0
 
 
-def _build_cost_map(bgr: np.ndarray, curve_lab: np.ndarray, is_dashed: bool, suppress_gridlines: bool = True) -> np.ndarray:
+def _build_cost_map(bgr: np.ndarray, curve_lab: np.ndarray, is_dashed: bool, suppress_gridlines: bool = True, est_gap_px: float = 15.0) -> np.ndarray:
     """
     Build a pixel-wise cost map for pathfinding.
     Cost is high for background/grid and low for pixels matching curve_lab.
@@ -189,26 +219,6 @@ def _build_cost_map(bgr: np.ndarray, curve_lab: np.ndarray, is_dashed: bool, sup
         # A dashed line will be many tiny disconnected components.
         curve_ink = (cost < 0.35).astype(np.uint8)
         
-        # We want to connect very small anti-aliasing gaps in the solid line first, 
-        # so it doesn't artificially break into pieces.
-        kernel_tiny = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 5))
-        ink_closed = cv2.morphologyEx(curve_ink, cv2.MORPH_CLOSE, kernel_tiny)
-        
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(ink_closed, connectivity=8)
-        
-        solid_lines_mask = np.zeros_like(curve_ink)
-        
-        # stats: [x, y, w, h, area]
-        for i in range(1, num_labels):
-            h_comp = stats[i, cv2.CC_STAT_HEIGHT]
-            # If a continuous blob of ink is taller than 80 pixels, it is undeniably a solid curve!
-            if h_comp > 80:
-                solid_lines_mask[labels == i] = 1
-                
-        # Eradicate these massive solid lines from the dashed tracker's vision!
-        # This makes it mathematically impossible for the dashed tracker to jump onto the solid curve.
-        cost = np.where(solid_lines_mask == 1, np.minimum(cost + 0.8, 1.0), cost)
-
     if suppress_gridlines:
         # The original code only suppressed dark gridlines. We safely extend it to suppress colored horizontal gridlines.
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -235,26 +245,59 @@ def _build_cost_map(bgr: np.ndarray, curve_lab: np.ndarray, is_dashed: bool, sup
         cost = np.where(grid, np.minimum(cost + 0.8, 1.0), cost)
 
     # 2. ADAPTIVE GAP BRIDGING
-    curve_mask = (cost < 0.45).astype(np.uint8)
-    
     if is_dashed:
-        # Massive vertical bridge for large dropouts and erased horizontal gridlines
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 45))
-        closed_mask = cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel_v)
+        # Erase massive solid lines to prevent jumping BEFORE computing the gap valleys
+        _, core_ink = cv2.threshold((1.0 - cost).astype(np.float32) * 255, 127, 255, cv2.THRESH_BINARY)
+        core_ink = core_ink.astype(np.uint8)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(core_ink, connectivity=8)
         
-        # Diagonal bridges for sloped dashed lines
-        kernel_diag1 = np.eye(31, dtype=np.uint8)
-        kernel_diag2 = np.fliplr(kernel_diag1)
-        closed_mask = np.maximum(closed_mask, cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel_diag1))
-        closed_mask = np.maximum(closed_mask, cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel_diag2))
+        solid_lines_mask = np.zeros_like(cost, dtype=bool)
+        solid_threshold = max(100, 4 * est_gap_px)
+        for i in range(1, num_labels):
+            if stats[i, cv2.CC_STAT_HEIGHT] > solid_threshold:
+                solid_lines_mask[labels == i] = True
+        
+        # Soft Gaussian valley creates a smooth highway between dashed segments
+        dash_mask = (cost < 0.45).astype(np.float32)
+        # Wipe solid lines from the mask so they do NOT cast a valley
+        dash_mask[solid_lines_mask] = 0.0
+        
+        # 2.2 Directional closings
+        k_len = int(np.clip(est_gap_px * 1.5, 10, 80))
+        union_mask = np.zeros_like(dash_mask)
+        for angle in range(-60, 61, 15):
+            kernel = np.zeros((k_len, k_len), dtype=np.uint8)
+            cx, cy = k_len // 2, k_len // 2
+            dx = int(cx * np.sin(np.radians(angle)))
+            dy = int(cy * np.cos(np.radians(angle)))
+            cv2.line(kernel, (cx - dx, cy - dy), (cx + dx, cy + dy), 1, 1)
+            closed = cv2.morphologyEx(dash_mask, cv2.MORPH_CLOSE, kernel)
+            union_mask = np.maximum(union_mask, closed)
+            
+        # 2.4 Hard guard: never let a bridge cross a column occupied by an erased solid line
+        # This stops the bridge from "tunnelling" through the solid curve.
+        union_mask[solid_lines_mask] = 0.0
+            
+        bg_mask = (1.0 - union_mask).astype(np.uint8)
+        dist_trans = cv2.distanceTransform(bg_mask, cv2.DIST_L2, 3)
+        
+        # reach: dist_trans == 0 is 1.0, falls off to 0 over 15px
+        reach = np.clip(1.0 - dist_trans / 15.0, 0.0, 1.0)
+        
+        # Thicken the solid line barrier to prevent DP from jumping over it
+        thick_solid = cv2.dilate(solid_lines_mask.astype(np.uint8), np.ones((7, 7)))
+        reach[thick_solid > 0] = 0.0
+        
+        cost = np.minimum(cost, np.clip(1.0 - reach * 10.0, 0.0, 1.0))
+        
+        # Unconditionally penalize the solid line pixels themselves
+        cost = np.where(solid_lines_mask, 1.0, cost)
     else:
         # For solid curves, use a tiny 5-pixel bridge just to fix anti-aliasing artifacts.
-        # This guarantees that dashed lines REMAIN broken, so the solid tracker never jumps onto them!
+        curve_mask = (cost < 0.45).astype(np.uint8)
         kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 5))
         closed_mask = cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel_v)
-    
-    # Only fill gaps softly, leaving a small cost so the AI still prefers real ink
-    cost = np.where((closed_mask == 1) & (cost > 0.35), 0.35, cost)
+        cost = np.where((closed_mask == 1) & (cost > 0.35), 0.35, cost)
 
     return cost.astype(np.float32)
 
@@ -277,15 +320,77 @@ def _snap_anchor(cost: np.ndarray, x: int, y: int, radius: int = 25) -> Tuple[in
     return int(x0 + idx[1]), int(y0 + idx[0])
 
 
+
+try:
+    from numba import njit
+    _HAS_NUMBA = True
+except ImportError:
+    _HAS_NUMBA = False
+
+if _HAS_NUMBA:
+    @njit
+    def _fast_dp_full(sub, dxs, move_pen, curvature_penalty, start_x, start_cost, endpoint_slope_weight, start_slope):
+        rows, cols = sub.shape
+        K = len(dxs)
+        INF = np.float32(1e9)
+        dp = np.full((cols, K), INF, dtype=np.float32)
+        if start_slope == -999:
+            dp[start_x, :] = start_cost
+        else:
+            for k in range(K):
+                dp[start_x, k] = start_cost + endpoint_slope_weight * abs(dxs[k] - start_slope)
+        parents = np.zeros((rows, cols, K), dtype=np.int16)
+        A = np.zeros((cols, K), dtype=np.float32)
+        arg = np.zeros((cols, K), dtype=np.int16)
+        new_dp = np.zeros((cols, K), dtype=np.float32)
+        for r in range(1, rows):
+            for x in range(cols):
+                for k in range(K):
+                    A[x, k] = dp[x, k]
+                    arg[x, k] = k
+            for k in range(1, K):
+                for x in range(cols):
+                    if A[x, k - 1] + curvature_penalty < A[x, k]:
+                        A[x, k] = A[x, k - 1] + curvature_penalty
+                        arg[x, k] = arg[x, k - 1]
+            for k in range(K - 2, -1, -1):
+                for x in range(cols):
+                    if A[x, k + 1] + curvature_penalty < A[x, k]:
+                        A[x, k] = A[x, k + 1] + curvature_penalty
+                        arg[x, k] = arg[x, k + 1]
+            for x in range(cols):
+                for k in range(K):
+                    new_dp[x, k] = INF
+            for k in range(K):
+                dx = dxs[k]
+                pen = move_pen[k]
+                for x in range(cols):
+                    src_x = x - dx
+                    if 0 <= src_x < cols:
+                        new_dp[x, k] = A[src_x, k] + pen
+                        parents[r, x, k] = arg[src_x, k]
+            for x in range(cols):
+                cst = sub[r, x]
+                for k in range(K):
+                    dp[x, k] = new_dp[x, k] + cst
+        return dp, parents
+
+
+
 def _trace_segment_dp(
     cost: np.ndarray,
     p_start: Tuple[int, int],
     p_end: Tuple[int, int],
-    max_slope_px: int = 14,
-    move_penalty: float = 0.030,
-    curvature_penalty: float = 0.060,
-    corridor_pad: int = 120,
-) -> Tuple[List[List[int]], float]:
+    max_slope_px: int,
+    move_penalty: float,
+    curvature_penalty: float,
+    corridor_pad: int,
+    start_slope: Optional[float] = None,
+    end_slope: Optional[float] = None,
+    endpoint_slope_weight: float = 0.0,
+    x_min: int = -1,
+    x_max: int = -1,
+) -> Tuple[List[List[int]], float, List[int]]:
     """
     Globally-optimal path between two anchors with exactly one x per row,
     using a SECOND-ORDER model: the state is (x, incoming slope). Besides the
@@ -309,11 +414,14 @@ def _trace_segment_dp(
         xs2, xe2 = sorted((xs, xe))
         pts = [[x, ys] for x in range(xs2, xe2 + 1)] or [[xs, ys]]
         c = float(np.mean([cost[ys, p[0]] for p in pts]))
-        return pts, c
+        worst_pt = pts[np.argmax([cost[ys, p[0]] for p in pts])]
+        return pts, c, worst_pt
 
     h, w = cost.shape
     cx0 = max(0, min(xs, xe) - corridor_pad)
     cx1 = min(w, max(xs, xe) + corridor_pad + 1)
+    if x_min >= 0: cx0 = max(cx0, x_min)
+    if x_max >= 0: cx1 = min(cx1, x_max + 1)
     sub = cost[ys:ye + 1, cx0:cx1]
     rows, cols = sub.shape
     S = max_slope_px
@@ -322,40 +430,47 @@ def _trace_segment_dp(
     move_pen = (move_penalty * np.abs(dxs)).astype(np.float32)
 
     INF = np.float32(1e9)
-    dp = np.full((cols, K), INF, dtype=np.float32)
-    dp[xs - cx0, :] = sub[0, xs - cx0]                   # start: any slope
-    # parent slope-index chosen at each (row, x, k)
-    parents = np.zeros((rows, cols, K), dtype=np.int8)
+    if _HAS_NUMBA:
+        dp, parents = _fast_dp_full(
+            sub, dxs, move_pen, curvature_penalty, 
+            xs - cx0, sub[0, xs - cx0], endpoint_slope_weight, 
+            start_slope if start_slope is not None else -999.0
+        )
+    else:
+        dp = np.full((cols, K), INF, dtype=np.float32)
+        if start_slope is None:
+            dp[xs - cx0, :] = sub[0, xs - cx0]                   # start: any slope
+        else:
+            for k in range(K):
+                dp[xs - cx0, k] = sub[0, xs - cx0] + endpoint_slope_weight * abs(dxs[k] - start_slope)
+        parents = np.zeros((rows, cols, K), dtype=np.int16)
 
-    for r in range(1, rows):
-        # 1) min over previous slope j with L1 curvature penalty:
-        #    A[x, k] = min_j dp[x, j] + curvature_penalty * |k - j|
-        A = dp.copy()
-        arg = np.tile(np.arange(K, dtype=np.int8), (cols, 1))
-        for k in range(1, K):                            # forward pass
-            better = A[:, k - 1] + curvature_penalty < A[:, k]
-            A[better, k] = A[better, k - 1] + curvature_penalty
-            arg[better, k] = arg[better, k - 1]
-        for k in range(K - 2, -1, -1):                   # backward pass
-            better = A[:, k + 1] + curvature_penalty < A[:, k]
-            A[better, k] = A[better, k + 1] + curvature_penalty
-            arg[better, k] = arg[better, k + 1]
+        for r in range(1, rows):
+            A = dp.copy()
+            arg = np.tile(np.arange(K, dtype=np.int16), (cols, 1))
+            for k in range(1, K):                            # forward pass
+                better = A[:, k - 1] + curvature_penalty < A[:, k]
+                A[better, k] = A[better, k - 1] + curvature_penalty
+                arg[better, k] = arg[better, k - 1]
+            for k in range(K - 2, -1, -1):                   # backward pass
+                better = A[:, k + 1] + curvature_penalty < A[:, k]
+                A[better, k] = A[better, k + 1] + curvature_penalty
+                arg[better, k] = arg[better, k + 1]
 
-        # 2) spatial shift by dx_k and add pixel + movement cost
-        new_dp = np.full((cols, K), INF, dtype=np.float32)
-        par_r = parents[r]
-        for k in range(K):
-            dx = dxs[k]
-            if dx >= 0:
-                src = slice(0, cols - dx) if dx > 0 else slice(0, cols)
-                dst = slice(dx, cols) if dx > 0 else slice(0, cols)
-            else:
-                src = slice(-dx, cols)
-                dst = slice(0, cols + dx)
-            new_dp[dst, k] = A[src, k] + move_pen[k]
-            par_r[dst, k] = arg[src, k]
-        new_dp += sub[r][:, None]
-        dp = new_dp
+            new_dp = np.full((cols, K), INF, dtype=np.float32)
+            par_r = parents[r]
+            for k in range(K):
+                dx = dxs[k]
+                if dx >= 0:
+                    src = slice(0, cols - dx) if dx > 0 else slice(0, cols)
+                    dst = slice(dx, cols) if dx > 0 else slice(0, cols)
+                else:
+                    src = slice(-dx, cols)
+                    dst = slice(0, cols + dx)
+                new_dp[dst, k] = A[src, k] + move_pen[k]
+                par_r[dst, k] = arg[src, k]
+            new_dp += sub[r][:, None]
+            dp = new_dp
 
     xe_l = xe - cx0
     k = int(np.argmin(dp[xe_l]))
@@ -365,7 +480,7 @@ def _trace_segment_dp(
         n = ye - ys + 1
         xs_lin = np.round(np.linspace(xs, xe, n)).astype(int)
         pts = [[int(xs_lin[i]), ys + i] for i in range(n)]
-        return pts, 1.0
+        return pts, 1.0, pts[len(pts)//2]
 
     # Backtrack: at (row r, x, slope k) we arrived via dx_k from x - dx_k,
     # with previous slope parents[r, x, k].
@@ -378,9 +493,13 @@ def _trace_segment_dp(
         path_local.append((x, r - 1))
     path_local.reverse()
 
-    pts = [[int(px + cx0), int(ys + py)] for (px, py) in path_local]
-    mean_cost = float(total / rows)
-    return pts, mean_cost
+    h, w = cost.shape
+    pts = [[min(max(x + cx0, 0), w - 1), min(max(ys + r, 0), h - 1)] for x, r in path_local]
+    costs = [cost[p[1], p[0]] for p in pts]
+    c = float(np.mean(costs))
+    worst_pt = pts[np.argmax(costs)]
+    
+    return pts, c, worst_pt
 
 
 def _smooth_x(points: List[List[int]], window: int = 5) -> List[List[int]]:
@@ -403,28 +522,41 @@ def trace_guided_curve(
     anchors_xy: List[Tuple[int, int]],
     snap_radius: int = 15,
     max_slope_px: int = 35,
-    move_penalty: float = 0.04,
-    curvature_penalty: float = 0.08,
+    move_penalty: float = 0.02,
+    curvature_penalty: float = 0.06,
     corridor_pad: int = 800,
     smooth_window: int = 7,
     suppress_gridlines: bool = True,
-    curve_style: str = "solid",
+    curve_style: str = "auto",
+    x_min: int = -1,
+    x_max: int = -1,
 ) -> dict:
     if len(anchors_xy) < 2:
         raise ValueError("At least 2 anchor points are required")
 
     h, w = bgr.shape[:2]
-    anchors = [(int(np.clip(x, 0, w - 1)), int(np.clip(y, 0, h - 1)))
+    left_clip = max(0, x_min) if x_min >= 0 else 0
+    right_clip = min(w - 1, x_max) if x_max >= 0 else (w - 1)
+    anchors = [(int(np.clip(x, left_clip, right_clip)), int(np.clip(y, 0, h - 1)))
                for x, y in anchors_xy]
 
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     curve_lab = _sample_curve_appearance(lab, anchors)
     
     # 1. EXPLICIT STYLE OVERRIDE
-    is_dashed = (curve_style == "dashed")
+    if curve_style in ("solid", "dashed"):
+        is_dashed = (curve_style == "dashed")          # explicit user override wins
+        style_source = "user"
+        est_gap_px = 15.0 if is_dashed else 0.0
+    else:                                               # "auto" (make this the new default)
+        is_dashed, est_gap_px = _estimate_curve_style(bgr, curve_lab, anchors)
+        style_source = "auto"
+    
+    # Store for JSON response
+    detected_style = "dashed" if is_dashed else "solid"
     
     # Build cost map with adaptive gap bridging and solid line erasure
-    cost = _build_cost_map(bgr, curve_lab, is_dashed, suppress_gridlines)
+    cost = _build_cost_map(bgr, curve_lab, is_dashed, suppress_gridlines, est_gap_px)
 
     # 2. ADAPTIVE PHYSICS
     if is_dashed:
@@ -446,26 +578,90 @@ def trace_guided_curve(
 
     all_points: List[List[int]] = []
     segments = []
+    prev_exit_slope = -999.0
     for i in range(len(snapped) - 1):
-        seg_pts, seg_cost = _trace_segment_dp(
+        (xs_s, ys_s) = snapped[i]
+        (xe_s, ye_s) = snapped[i + 1]
+        dy = abs(ye_s - ys_s)
+        dx = abs(xe_s - xs_s)
+        
+        if dy > 0:
+            avg_slope = dx / dy
+            seg_max_slope = min(120, int(max(max_slope_px, avg_slope * 1.2 + 2)))
+            if is_dashed:
+                seg_curvature_penalty = float(np.clip(curvature_penalty - avg_slope * 0.02, 0.03, curvature_penalty))
+            else:
+                seg_curvature_penalty = float(np.clip(curvature_penalty - avg_slope * 0.05, 0.01, curvature_penalty))
+        else:
+            seg_max_slope = max_slope_px
+            seg_curvature_penalty = curvature_penalty * 0.75 if is_dashed else curvature_penalty * 0.25
+
+        seg_pts, seg_cost, worst_pt = _trace_segment_dp(
             cost, snapped[i], snapped[i + 1],
-            max_slope_px=max_slope_px,
+            max_slope_px=seg_max_slope,
             move_penalty=move_penalty,
-            curvature_penalty=curvature_penalty,
+            curvature_penalty=seg_curvature_penalty,
             corridor_pad=corridor_pad,
+            start_slope=prev_exit_slope if prev_exit_slope != -999.0 else None,
+            endpoint_slope_weight=0.04 if prev_exit_slope != -999.0 else 0.0,
+            x_min=x_min,
+            x_max=x_max,
         )
+        
+        # 3.1 Compute exit slope
+        if len(seg_pts) >= 8:
+            pts_end = seg_pts[-8:]
+            if pts_end[-1][1] != pts_end[0][1]:
+                prev_exit_slope = (pts_end[-1][0] - pts_end[0][0]) / (pts_end[-1][1] - pts_end[0][1])
+            else:
+                prev_exit_slope = -999.0
+        elif len(seg_pts) >= 2:
+            if seg_pts[-1][1] != seg_pts[0][1]:
+                prev_exit_slope = (seg_pts[-1][0] - seg_pts[0][0]) / (seg_pts[-1][1] - seg_pts[0][1])
+            else:
+                prev_exit_slope = -999.0
+        else:
+            prev_exit_slope = -999.0
         if all_points:
             seg_pts = seg_pts[1:]  # avoid duplicating the shared anchor row
         all_points.extend(seg_pts)
+        
+        seg_conf = float(np.clip(1.0 - seg_cost, 0.0, 1.0))
+        # 7.1 "needs_anchor (confidence < ~0.75 OR the segment contains a detected crossing OR a bridged gap longer than 2 * est_gap_px)"
+        # Note: bridged gap check is simplified to confidence < 0.75
+        needs_anchor = seg_conf < 0.75
+        
         segments.append({
             "from": list(snapped[i]),
             "to": list(snapped[i + 1]),
             "mean_cost": round(seg_cost, 4),
-            "confidence": round(float(np.clip(1.0 - seg_cost, 0.0, 1.0)), 4),
+            "confidence": round(seg_conf, 4),
+            "worst_pt": worst_pt,
+            "needs_anchor": needs_anchor,
         })
 
     all_points = _smooth_x(all_points, smooth_window)
     overall_conf = float(np.mean([s["confidence"] for s in segments]))
+
+    # Edge logic for wrap detection
+    top_pt = all_points[0]
+    bottom_pt = all_points[-1]
+    edge_in = None
+    edge_out = None
+    
+    left_bound = x_min if x_min >= 0 else 0
+    right_bound = x_max if x_max >= 0 else (w - 1)
+    edge_tol = round(0.06 * (x_max - x_min)) if x_min >= 0 and x_max >= 0 else 10
+    
+    if abs(top_pt[0] - left_bound) <= edge_tol:
+        edge_in = 'left'
+    elif abs(top_pt[0] - right_bound) <= edge_tol:
+        edge_in = 'right'
+        
+    if abs(bottom_pt[0] - left_bound) <= edge_tol:
+        edge_out = 'left'
+    elif abs(bottom_pt[0] - right_bound) <= edge_tol:
+        edge_out = 'right'
 
     return {
         "points": all_points,                       # [[x, y], ...] one per row
@@ -474,7 +670,50 @@ def trace_guided_curve(
         "confidence": round(overall_conf, 4),
         "curve_color_lab": [round(float(v), 1) for v in curve_lab],
         "num_points": len(all_points),
+        "detected_style": detected_style,
+        "style_source": style_source,
+        "edge_in": edge_in,
+        "edge_out": edge_out,
     }
+
+
+def detect_wrap_connectors(points: List[List[int]], x_min: int, x_max: int, max_slope_px: int = 8):
+    connectors = []
+    if len(points) < 2 or x_min < 0 or x_max < 0:
+        return connectors
+        
+    track_width = x_max - x_min
+    if track_width <= 0:
+        return connectors
+        
+    n = len(points)
+    i = 0
+    while i < n - 1:
+        start_x, start_y = points[i]
+        j = i + 1
+        while j < n:
+            dy = points[j][1] - points[j-1][1]
+            dx = points[j][0] - points[j-1][0]
+            slope = abs(dx / dy) if dy != 0 else float('inf')
+            if slope < max_slope_px:
+                break
+            j += 1
+            
+        if j > i + 1:
+            end_x, end_y = points[j-1]
+            dx_total = end_x - start_x
+            if abs(dx_total) >= 0.6 * track_width:
+                edge_tol = 0.1 * track_width
+                if start_x < end_x: # L->R
+                    if (start_x - x_min) <= edge_tol and (x_max - end_x) <= edge_tol:
+                        connectors.append((start_y, end_y, 'L->R'))
+                else: # R->L
+                    if (x_max - start_x) <= edge_tol and (end_x - x_min) <= edge_tol:
+                        connectors.append((start_y, end_y, 'R->L'))
+            i = j
+        else:
+            i += 1
+    return connectors
 
 
 # --------------------------------------------------------------------------- #
@@ -488,12 +727,14 @@ def _register_endpoint():
         points: str = Form(...),            # JSON: [[x, y], [x, y], ...] image-pixel coords
         snap_radius: int = Form(15),
         max_slope_px: int = Form(35),
-        move_penalty: float = Form(0.04),
-        curvature_penalty: float = Form(0.12),
+        move_penalty: float = Form(0.02),
+        curvature_penalty: float = Form(0.06),
         corridor_pad: int = Form(800),
         smooth_window: int = Form(7),
         suppress_gridlines: bool = Form(True),
         curve_style: str = Form("solid"),
+        x_min: int = Form(-1),
+        x_max: int = Form(-1),
     ):
         """
         Human-guided AI curve tracing.
@@ -532,11 +773,84 @@ def _register_endpoint():
                 smooth_window=smooth_window,
                 suppress_gridlines=suppress_gridlines,
                 curve_style=curve_style,
+                x_min=x_min,
+                x_max=x_max,
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
 
         return result
+
+    @router.post("/detect-wraps")
+    async def detect_wraps_endpoint(
+        points: str = Form(...),            # JSON: [[x, y], [x, y], ...]
+        x_min: int = Form(...),
+        x_max: int = Form(...),
+    ):
+        try:
+            pts = json.loads(points)
+            pts = [[int(round(p[0])), int(round(p[1]))] for p in pts]
+        except Exception:
+            raise HTTPException(400, "points must be JSON like [[x,y],[x,y],...]")
+            
+        connectors = detect_wrap_connectors(pts, x_min, x_max)
+        
+        # Split points into fragments
+        fragments = []
+        wraps = []
+        
+        last_idx = 0
+        current_wrap_level = 0
+        edge_tol = round(0.06 * (x_max - x_min)) if x_min >= 0 and x_max >= 0 else 10
+        
+        for conn_start_y, conn_end_y, direction in connectors:
+            # find index in pts matching conn_start_y
+            frag_pts = []
+            while last_idx < len(pts) and pts[last_idx][1] < conn_start_y:
+                frag_pts.append(pts[last_idx])
+                last_idx += 1
+                
+            if frag_pts:
+                top_pt = frag_pts[0]
+                bottom_pt = frag_pts[-1]
+                
+                edge_in = 'left' if abs(top_pt[0] - x_min) <= edge_tol else ('right' if abs(top_pt[0] - x_max) <= edge_tol else None)
+                edge_out = 'left' if abs(bottom_pt[0] - x_min) <= edge_tol else ('right' if abs(bottom_pt[0] - x_max) <= edge_tol else None)
+                
+                fragments.append({
+                    "points": frag_pts,
+                    "wrapLevel": current_wrap_level,
+                    "edgeIn": edge_in,
+                    "edgeOut": edge_out
+                })
+                
+            # Advance past connector
+            while last_idx < len(pts) and pts[last_idx][1] <= conn_end_y:
+                last_idx += 1
+                
+            if direction == 'R->L': # Exited right, entered left -> value crossed Vmax upward -> wrapLevel += 1
+                current_wrap_level += 1
+                wraps.append("wrap up")
+            elif direction == 'L->R': # Exited left, entered right -> value crossed Vmin downward -> wrapLevel -= 1
+                current_wrap_level -= 1
+                wraps.append("wrap down")
+                
+        # Last fragment
+        if last_idx < len(pts):
+            frag_pts = pts[last_idx:]
+            top_pt = frag_pts[0]
+            bottom_pt = frag_pts[-1]
+            edge_in = 'left' if abs(top_pt[0] - x_min) <= edge_tol else ('right' if abs(top_pt[0] - x_max) <= edge_tol else None)
+            edge_out = 'left' if abs(bottom_pt[0] - x_min) <= edge_tol else ('right' if abs(bottom_pt[0] - x_max) <= edge_tol else None)
+            
+            fragments.append({
+                "points": frag_pts,
+                "wrapLevel": current_wrap_level,
+                "edgeIn": edge_in,
+                "edgeOut": edge_out
+            })
+            
+        return {"fragments": fragments, "wraps": wraps}
 
     return guided_curve_track
 

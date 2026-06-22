@@ -312,9 +312,10 @@ const normBoundary = (b, W, H) => {
 };
 
 const lineBounds = (line, W, H) => {
-  if (!line?.length) return { left: 0, right: W, top: 0, bottom: H };
-  const xs = line.map(p => p[0]);
-  const ys = line.map(p => p[1]);
+  const realPts = (line || []).filter(Boolean);
+  if (!realPts.length) return { left: 0, right: W, top: 0, bottom: H };
+  const xs = realPts.map(p => p[0]);
+  const ys = realPts.map(p => p[1]);
   return normBoundary(
     { left: Math.min(...xs), right: Math.max(...xs), top: Math.min(...ys), bottom: Math.max(...ys) },
     W, H
@@ -514,21 +515,34 @@ const detectGridDivisions = (imageData, width, height) => {
 };
 
 const curvePointToValues = (point, croppedRegion, xScale, depthScaleObj) => {
-  const sourcePoint = Array.isArray(point) ? { x: Number(point[0]), y: Number(point[1]) } : point;
+  const sourcePoint = Array.isArray(point) ? { x: Number(point[0]), y: Number(point[1]), wrapLevel: Number(point[2] || 0) } : point;
   const localX = Number(sourcePoint.x) - Number(croppedRegion.bounds.left);
   const localY = Number(sourcePoint.y) - Number(croppedRegion.bounds.top);
   if (!Number.isFinite(localX) || !Number.isFinite(localY)) return null;
   if (localX < 0 || localX > croppedRegion.width || localY < 0 || localY > croppedRegion.height) return null;
+  
+  const baseValue = pixelToValue(localX, 0, croppedRegion.width, xScale.xLeft, xScale.xRight);
+  const wrapLevel = Number(sourcePoint.wrapLevel || 0);
+  const wrapOffset = wrapLevel * (Number(xScale.xRight) - Number(xScale.xLeft));
+  
   return {
     depth: pixelToValue(localY, 0, croppedRegion.height, depthScaleObj.top, depthScaleObj.bottom),
-    value: pixelToValue(localX, 0, croppedRegion.width, xScale.xLeft, xScale.xRight),
+    value: baseValue + wrapOffset,
   };
 };
 
-const resampleAt0_50 = (rawPoints, croppedRegion, xScale, depthScaleObj) => {
+const resampleAt0_50 = (rawPoints, croppedRegion, xScale, depthScaleObj, wrapLevelsArr) => {
   const nullValue = -9999.25;
   const step = 0.5;
-  const physicalPoints = (rawPoints || [])
+  // Filter null break-markers and annotate each point with its wrapLevel
+  const realPoints = (rawPoints || []).reduce((acc, pt, i) => {
+    if (!pt) return acc; // skip break markers
+    // Attach wrapLevel from parallel array (if available), else fall back to point[2]
+    const wl = wrapLevelsArr ? (wrapLevelsArr[i] ?? 0) : (Array.isArray(pt) ? (Number(pt[2]) || 0) : 0);
+    acc.push(Array.isArray(pt) ? [pt[0], pt[1], wl] : { ...pt, wrapLevel: wl });
+    return acc;
+  }, []);
+  const physicalPoints = realPoints
     .map(point => curvePointToValues(point, croppedRegion, xScale, depthScaleObj))
     .filter(Boolean)
     .sort((a, b) => a.depth - b.depth);
@@ -636,7 +650,7 @@ const buildLASString = ({ wellName, field, date, depthTop, depthBottom, depthSte
     "~CURVE INFORMATION",
     ` DEPT.${depthUnit.padEnd(8)}              : DEPTH`,
     ...curveList.map((curve, idx) => {
-      const name = String(curve.name || `G${idx + 1}`).trim().toUpperCase().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "").slice(0, 6) || `G${idx + 1}`;
+      const name = String(curve.name || `G${idx + 1}`).trim().toUpperCase().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "").slice(0, 30) || `G${idx + 1}`;
       const unit = String(curve.unit ?? "").replace(/\s+/g, "").slice(0, 8);
       return ` ${name.padEnd(6)}.${unit.padEnd(8)}              : ${curve.description || curve.name || name}`;
     }),
@@ -648,7 +662,7 @@ const buildLASString = ({ wellName, field, date, depthTop, depthBottom, depthSte
     "",
   ].join("\n");
   const curveNames = curveList.map((curve, idx) => (
-    String(curve.name || `G${idx + 1}`).trim().toUpperCase().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "").slice(0, 6) || `G${idx + 1}`
+    String(curve.name || `G${idx + 1}`).trim().toUpperCase().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "").slice(0, 30) || `G${idx + 1}`
   ));
   const dataLines = [
     "~ASCII LOG DATA",
@@ -1365,6 +1379,8 @@ export default function GraphTrackerV2() {
   const [pendingHeaderDownload, setPendingHeaderDownload] = useState(null);
   const [showWorkflowInstructions, setShowWorkflowInstructions] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showLeftMenu, setShowLeftMenu] = useState(true);
+  const [showRightMenu, setShowRightMenu] = useState(true);
 
   useEffect(() => {
     document.title = "Well Log Digitization";
@@ -1378,6 +1394,7 @@ export default function GraphTrackerV2() {
 
   /* ── Graph Data ── */
   const [sourceGraphLines, setSourceGraphLinesRaw] = useState([]);
+  const [curveWrapLevels, setCurveWrapLevels] = useState([]);
   const [visibleGraphMap, setVisibleGraphMap] = useState({});
   const [graphBoundaries, setGraphBoundariesRaw] = useState([]);
   const [graphScales, setGraphScales] = useState([]);
@@ -1491,6 +1508,8 @@ export default function GraphTrackerV2() {
   const [croppedGraphRegions, setCroppedGraphRegions] = useState([]);
   const [axisScales, setAxisScales] = useState([]);
   const [curveNames, setCurveNames] = useState([]);
+  const [curveColors, setCurveColors] = useState([]);
+  const [curveIds, setCurveIds] = useState([]);
   const [depthScale, setDepthScale] = useState(null);
   const [gridInfo, setGridInfo] = useState([]);
 
@@ -1573,7 +1592,7 @@ export default function GraphTrackerV2() {
     sourceGraphLines.map((line, idx) => ({
       index: idx,
       label: `Graph ${gLabel(idx)}`,
-      color: GRAPH_COLORS[idx % GRAPH_COLORS.length],
+      color: curveColors[idx] || GRAPH_COLORS[idx % GRAPH_COLORS.length],
       points: line.length,
       bounds: graphBoundaryView[idx],
     })), [sourceGraphLines, graphBoundaryView]);
@@ -1598,40 +1617,64 @@ export default function GraphTrackerV2() {
       // Draw curves
       sourceGraphLines.forEach((line, idx) => {
         if (visibleGraphMap[idx] === false || !line?.length) return;
-        const col = GRAPH_COLORS[idx % GRAPH_COLORS.length];
+        const col = curveColors[idx] || GRAPH_COLORS[idx % GRAPH_COLORS.length];
         ctx.strokeStyle = col;
         ctx.lineWidth = 2;
 
+        // Break-aware rendering: lift pen at null markers AND at big horizontal jumps (wrap edges)
         if (line.length > 1) {
+          // Compute track width for implicit wrap-jump detection
+          const realPts = line.filter(Boolean);
+          const curveBoundsX = realPts.length ? { min: Math.min(...realPts.map(p => p[0])), max: Math.max(...realPts.map(p => p[0])) } : { min: 0, max: imageDimensions.width };
+          const TRACK_W = curveBoundsX.max - curveBoundsX.min || imageDimensions.width;
+          const WRAP_JUMP = 0.4 * TRACK_W;
+
           ctx.beginPath();
-          ctx.moveTo(line[0][0] * zoom, line[0][1] * zoom);
-          for (let i = 1; i < line.length; i++) ctx.lineTo(line[i][0] * zoom, line[i][1] * zoom);
+          let penDown = false, prev = null;
+          for (let i = 0; i < line.length; i++) {
+            const pt = line[i];
+            if (!pt) { penDown = false; prev = null; continue; } // explicit break marker
+            const X = pt[0] * zoom, Y = pt[1] * zoom;
+            if (penDown && prev) {
+              const dx = Math.abs(pt[0] - prev[0]), dy = Math.abs(pt[1] - prev[1]);
+              if (dx > WRAP_JUMP && dx > dy * 2) { penDown = false; } // implicit wrap-jump -> lift pen
+            }
+            if (!penDown) { ctx.moveTo(X, Y); penDown = true; }
+            else { ctx.lineTo(X, Y); }
+            prev = pt;
+          }
           ctx.stroke();
         }
 
-        line.forEach(([x, y]) => {
+        // Dots only at anchor-density intervals — skip for very dense traced curves
+        const realPtsForDots = line.filter(Boolean);
+        const dotInterval = realPtsForDots.length > 200 ? Math.ceil(realPtsForDots.length / 100) : 1;
+        realPtsForDots.forEach((pt, i) => {
+          if (i % dotInterval !== 0) return;
           ctx.beginPath();
-          ctx.arc(x * zoom, y * zoom, 3, 0, 2 * Math.PI);
+          ctx.arc(pt[0] * zoom, pt[1] * zoom, 3, 0, 2 * Math.PI);
           ctx.fillStyle = col;
           ctx.fill();
         });
 
-        // Label
-        if (line[0]) {
-          const [lx, ly] = line[0];
+        // Label: use first non-null point
+        const firstPt = line.find(Boolean);
+        if (firstPt) {
+          const [lx, ly] = firstPt;
+          const textLabel = curveNames[idx] || `Graph ${gLabel(idx)}`;
           ctx.font = "bold 13px Inter, sans-serif";
           ctx.strokeStyle = "rgba(0,0,0,0.7)";
           ctx.lineWidth = 3;
-          ctx.strokeText(`Graph ${gLabel(idx)}`, lx * zoom + 8, ly * zoom - 6);
+          ctx.strokeText(textLabel, lx * zoom + 8, ly * zoom - 6);
           ctx.fillStyle = "#fff";
-          ctx.fillText(`Graph ${gLabel(idx)}`, lx * zoom + 8, ly * zoom - 6);
+          ctx.fillText(textLabel, lx * zoom + 8, ly * zoom - 6);
         }
       });
 
       // Draw boundaries
       graphBoundaryView.forEach((b, idx) => {
         if (visibleGraphMap[idx] === false || !b) return;
-        const col = GRAPH_COLORS[idx % GRAPH_COLORS.length];
+        const col = curveColors[idx] || GRAPH_COLORS[idx % GRAPH_COLORS.length];
         ctx.strokeStyle = col;
         ctx.lineWidth = 1.5;
         ctx.setLineDash([5, 4]);
@@ -1749,6 +1792,8 @@ export default function GraphTrackerV2() {
       setCroppedGraphRegions([]);
       setAxisScales([]);
       setCurveNames([]);
+      setCurveColors([]);
+      setCurveIds([]);
       setDepthScale(null);
       setGridInfo([]);
       setShowScaleModal(false);
@@ -1830,6 +1875,8 @@ export default function GraphTrackerV2() {
       setCroppedGraphRegions([]);
       setAxisScales([]);
       setCurveNames([]);
+      setCurveColors([]);
+      setCurveIds([]);
       setDepthScale(null);
       setGridInfo([]);
       setShowScaleModal(false);
@@ -2112,11 +2159,19 @@ export default function GraphTrackerV2() {
     onMouseUp();
   };
 
-  const onWheel = (e) => {
+  const onWheel = useCallback((e) => {
     e.preventDefault();
     const delta = e.deltaY < 0 ? 0.12 : -0.12;
     setZoom(z => clamp(z + delta, 0.15, 5));
-  };
+  }, []);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (el) {
+      el.addEventListener("wheel", onWheel, { passive: false });
+      return () => el.removeEventListener("wheel", onWheel);
+    }
+  }, [onWheel]);
 
   /* ══════════════════════════════════════════════ BOUNDARY ACTIONS ══════════════════════════════════ */
   const cropGraphRegions = async (boundsList) => {
@@ -2239,7 +2294,7 @@ export default function GraphTrackerV2() {
     const sampledCurves = sourceGraphLines.map((line, idx) => {
       const croppedRegion = croppedGraphRegions[idx];
       const scale = axisScales[idx];
-      if (!line?.length) {
+      if (!line?.filter(Boolean).length) {
         errors.push(`No curve points detected for Graph ${gLabel(idx)}.`);
         return null;
       }
@@ -2251,7 +2306,8 @@ export default function GraphTrackerV2() {
         errors.push(`Scale values are invalid for Graph ${gLabel(idx)}.`);
         return null;
       }
-      const data = resampleAt0_50(line, croppedRegion, scale, depthScale);
+      // Pass the parallel wrapLevels array so resampleAt0_50 can apply wrap offsets
+      const data = resampleAt0_50(line, croppedRegion, scale, depthScale, curveWrapLevels[idx] || null);
       if (!data.length) {
         errors.push(`No valid curve points found inside Graph ${gLabel(idx)} boundary.`);
         return null;
@@ -2441,7 +2497,7 @@ export default function GraphTrackerV2() {
   };
 
   /* ══════════════════════════════════════════════ RENDER ═══════════════════════════════════════════ */
-  const totalPoints = sourceGraphLines.reduce((s, l) => s + l.length, 0);
+  const totalPoints = sourceGraphLines.reduce((s, l) => s + l.filter(Boolean).length, 0);
   const activePlot = selectedPlot || hoveredPlot;
   const activePlotScale = activePlot ? graphScales[activePlot.graphIdx] : null;
   const activePlotBoundary = activePlot ? graphBoundaryView[activePlot.graphIdx] : null;
@@ -2490,14 +2546,13 @@ export default function GraphTrackerV2() {
       {/* ══ TOP BAR ══════════════════════════════════════════════════════════════ */}
       <div className="h-16 border-b border-gray-200 bg-white flex items-center justify-between px-4 shrink-0 z-10">
         {/* LEFT */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 w-1/3 justify-start">
           {/* Logo */}
           <div className="flex items-center gap-3">
             <img src={drakeAiLogo} alt="Drake AI" className="h-14 w-auto object-contain" />
-            <span className="font-bold text-base text-gray-900 tracking-tight">Well Log Digitization</span>
           </div>
           {/* Divider */}
-          <div className="w-px h-5 bg-gray-200" />
+          {uploadedFile && <div className="w-px h-5 bg-gray-200" />}
           {/* File pill */}
           {uploadedFile && (
             <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-full py-0.5 px-3">
@@ -2507,8 +2562,13 @@ export default function GraphTrackerV2() {
           )}
         </div>
 
+        {/* CENTER */}
+        <div className="flex items-center justify-center w-1/3">
+          <span className="font-bold text-base text-gray-900 tracking-tight">Well Log Digitization</span>
+        </div>
+
         {/* RIGHT: undo/redo + icons */}
-        <div className="flex items-center gap-1 text-gray-500">
+        <div className="flex items-center gap-1 text-gray-500 w-1/3 justify-end">
           {/* Undo */}
           <button onClick={handleUndo} disabled={!canUndo} title="Undo (Ctrl+Z)"
             className={`p-1.5 rounded hover:bg-gray-100 transition-colors ${!canUndo ? "opacity-30 cursor-not-allowed" : ""}`}>
@@ -2540,15 +2600,27 @@ export default function GraphTrackerV2() {
       </div>
 
       {/* ══ CANVAS TOOLBAR ═══════════════════════════════════════════════════════ */}
-      <div className="h-10 border-b border-gray-200 bg-white flex items-center px-3 gap-2 shrink-0 overflow-x-auto">
+      <div className="h-12 border-b border-gray-200 bg-white flex items-center px-3 gap-3 shrink-0 overflow-x-auto">
+        {/* Left panel toggle */}
+        <button
+          onClick={() => setShowLeftMenu(p => !p)}
+          title={showLeftMenu ? 'Hide Menu' : 'Show Menu'}
+          className={`flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-lg border transition-colors ${
+            showLeftMenu ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
+          }`}>
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+        </button>
+        <div className="w-px h-5 bg-gray-200 flex-shrink-0" />
+        {/* centre group */}
+        <div className="flex items-center justify-center flex-1 gap-3">
         {/* Zoom controls */}
         <div className="flex items-center bg-gray-50 border border-gray-200 rounded divide-x divide-gray-200">
           {[
-            { label: "+ Zoom In", action: () => setZoom(z => Math.min(z + 0.15, 5)) },
-            { label: "− Zoom Out", action: () => setZoom(z => Math.max(z - 0.15, 0.2)) },
-            { label: "⊡ Fit", action: () => { setZoom(1); setPanOffset({ x: 0, y: 0 }); } },
+            { label: "🔍⁺ Zoom In", action: () => setZoom(z => Math.min(z + 0.15, 5)) },
+            { label: "🔍⁻ Zoom Out", action: () => setZoom(z => Math.max(z - 0.15, 0.2)) },
+            { label: "📺 Fit", action: () => { setZoom(1); setPanOffset({ x: 0, y: 0 }); } },
             { label: `${Math.round(zoom * 100)}%`, action: null },
-            { label: "↺ Reset", action: () => { setZoom(1); setPanOffset({ x: 0, y: 0 }); } },
+            { label: "🔄 Reset", action: () => { setZoom(1); setPanOffset({ x: 0, y: 0 }); } },
           ].map(({ label, action }) => (
             <button key={label} onClick={action}
               disabled={!action}
@@ -2562,12 +2634,12 @@ export default function GraphTrackerV2() {
 
         {/* Mode buttons */}
         {[
-          { m: "pan", icon: "✋", label: "Pan" },
-          { m: "insert", icon: "+", label: "Insert Pt." },
-          { m: "delete", icon: "🗑", label: "Delete Pt." },
+          { m: "pan", icon: "🖐️", label: "Pan" },
+          { m: "insert", icon: "📍", label: "Insert Pt." },
+          { m: "delete", icon: "🗑️", label: "Delete Pt." },
         ].map(({ m, icon, label }) => (
           <button key={m} onClick={() => setMode(m)}
-            className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === m
+            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === m
               ? m === "pan" ? "bg-blue-50 border-blue-300 text-blue-700"
                 : m === "insert" ? "bg-green-50 border-green-300 text-green-700"
                   : "bg-red-50 border-red-300 text-red-700"
@@ -2578,11 +2650,11 @@ export default function GraphTrackerV2() {
         ))}
 
         <button onClick={() => setMode("bounds")}
-          className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === "bounds"
+          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === "bounds"
             ? "bg-amber-50 border-amber-300 text-amber-700"
             : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
             }`}>
-          <span>□</span>Select Bounds
+          <span>📐</span>Select Bounds
         </button>
 
         <button
@@ -2596,11 +2668,11 @@ export default function GraphTrackerV2() {
               return next;
             });
           }}
-          className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded border transition-all ${smartCursorView
+          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${smartCursorView
             ? "bg-purple-50 border-purple-300 text-purple-700"
             : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
             }`}>
-          <span>🧭</span>
+          <span>⚡</span>
           AI Curve Tracking
         </button>
 
@@ -2609,9 +2681,9 @@ export default function GraphTrackerV2() {
         {/* Preview tabs */}
         <div className="flex items-center bg-gray-50 border border-gray-200 rounded divide-x divide-gray-200">
           {[
-            { key: "graph", label: "Graph View" },
-            { key: "header", label: "Header OCR" },
-            { key: "guided", label: "Guided Tracking" },
+            { key: "graph", label: "📊 Graph View" },
+            { key: "header", label: "🔍 Header OCR" },
+            { key: "guided", label: "🎯 Guided Tracking" },
           ].map(tab => (
             <button key={tab.key} onClick={() => setActiveViewTab(tab.key)}
               className={`px-2.5 py-1 text-xs font-medium transition-colors ${activeViewTab === tab.key ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-white"}`}>
@@ -2625,137 +2697,135 @@ export default function GraphTrackerV2() {
         {/* Undo / Redo in toolbar too */}
         <button onClick={handleUndo} disabled={!canUndo} title="Undo"
           className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 rounded border border-gray-200 hover:bg-gray-50 transition-colors ${!canUndo ? "opacity-30 cursor-not-allowed" : ""}`}>
-          ↩ Undo
+          ↩️ Undo
         </button>
         <button onClick={handleRedo} disabled={!canRedo} title="Redo"
           className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 rounded border border-gray-200 hover:bg-gray-50 transition-colors ${!canRedo ? "opacity-30 cursor-not-allowed" : ""}`}>
-          ↪ Redo
+          ↪️ Redo
+        </button>
+        </div>{/* end centre group */}
+        <div className="w-px h-5 bg-gray-200 flex-shrink-0" />
+        {/* Right panel toggle */}
+        <button
+          onClick={() => setShowRightMenu(p => !p)}
+          title={showRightMenu ? 'Hide Details' : 'Show Details'}
+          className={`flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-lg border transition-colors ${
+            showRightMenu ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
+          }`}>
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
         </button>
       </div>
 
       {/* ══ MAIN CONTENT AREA ═══════════════════════════════════════════════════ */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden relative">
 
         {/* ── LEFT SIDEBAR ─────────────────────────────────────────────────────── */}
-        <div className="w-56 bg-white border-r border-gray-200 flex flex-col overflow-y-auto shrink-0">
-          {/* FILE UPLOAD */}
-          <div className="px-4 pt-4 pb-3 border-b border-gray-100">
-            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">File</p>
-            <input id="graph-tracker-file-upload" ref={uploadInputRef} type="file" className="hidden" accept=".tif,.tiff" onChange={e => { if (e.target.files[0]) { handleFileUpload(e.target.files[0]); e.target.value = null; } }} />
-            {!uploadedFile ? (
-              <label htmlFor="graph-tracker-file-upload"
-                className="border-2 border-dashed border-blue-200 rounded-lg p-4 flex flex-col items-center cursor-pointer hover:bg-blue-50 transition-colors"
-                onDrop={e => { e.preventDefault(); handleFileUpload(e.dataTransfer.files[0]); }}
-                onDragOver={e => e.preventDefault()}>
-                <svg className="w-7 h-7 text-blue-400 mb-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
-                <span className="text-xs font-semibold text-gray-700">Upload File</span>
-                <span className="text-[10px] text-gray-400 text-center">Drag & drop or <span className="text-blue-600">browse</span></span>
-              </label>
-            ) : (
-              <label htmlFor="graph-tracker-file-upload" className="bg-blue-50 border border-blue-100 rounded-lg p-2.5 flex items-center gap-2 cursor-pointer hover:bg-blue-100 transition-colors group" title="Click to upload a new file">
-                <div className="bg-blue-600 text-white p-1.5 rounded-md shrink-0">
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                </div>
-                <div className="overflow-hidden flex-1">
-                  <p className="text-xs font-semibold text-gray-800 truncate">{uploadedFile.name}</p>
-                  <p className="text-[10px] text-gray-400">{(uploadedFile.size / 1024 / 1024).toFixed(1)} MB</p>
-                </div>
-                <svg className="w-4 h-4 text-blue-500 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-              </label>
-            )}
-          </div>
+        {showLeftMenu ? (
+          <div className="absolute top-4 left-4 z-20 w-64 bg-white/95 backdrop-blur-sm border border-gray-200 rounded-2xl shadow-xl flex flex-col max-h-[calc(100%-2rem)] overflow-y-auto transition-all duration-300 ease-in-out">
+            {/* Title bar */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-150">
+              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Menu</span>
+              <button onClick={() => setShowLeftMenu(false)} className="text-gray-400 hover:text-gray-650 font-bold text-xs p-1">
+                ✕
+              </button>
+            </div>
 
-          {/* PROCESS SETUP */}
-          <div className="px-4 pt-3 pb-3 border-b border-gray-100">
-            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Process Setup</p>
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Total Curves</label>
-                <input type="number" min="1" max="10" value={numGraphsInput} onChange={e => setNumGraphsInput(e.target.value)}
-                  className="flex-1 border border-gray-200 rounded-md px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400" />
+            {/* FILE UPLOAD */}
+            <div className="px-4 pt-4 pb-3 border-b border-gray-100">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">File</p>
+              <input id="graph-tracker-file-upload" ref={uploadInputRef} type="file" className="hidden" accept=".tif,.tiff" onChange={e => { if (e.target.files[0]) { handleFileUpload(e.target.files[0]); e.target.value = null; } }} />
+              {!uploadedFile ? (
+                <label htmlFor="graph-tracker-file-upload"
+                  className="border-2 border-dashed border-blue-200 rounded-lg p-4 flex flex-col items-center cursor-pointer hover:bg-blue-50 transition-colors"
+                  onDrop={e => { e.preventDefault(); handleFileUpload(e.dataTransfer.files[0]); }}
+                  onDragOver={e => e.preventDefault()}>
+                  <svg className="w-7 h-7 text-blue-400 mb-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
+                  <span className="text-xs font-semibold text-gray-700">Upload File</span>
+                  <span className="text-[10px] text-gray-400 text-center">Drag & drop or <span className="text-blue-600">browse</span></span>
+                </label>
+              ) : (
+                <label htmlFor="graph-tracker-file-upload" className="bg-blue-50 border border-blue-100 rounded-lg p-2.5 flex items-center gap-2 cursor-pointer hover:bg-blue-100 transition-colors group" title="Click to upload a new file">
+                  <div className="bg-blue-600 text-white p-1.5 rounded-md shrink-0">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                  </div>
+                  <div className="overflow-hidden flex-1">
+                    <p className="text-xs font-semibold text-gray-800 truncate">{uploadedFile.name}</p>
+                    <p className="text-[10px] text-gray-400">{(uploadedFile.size / 1024 / 1024).toFixed(1)} MB</p>
+                  </div>
+                  <svg className="w-4 h-4 text-blue-500 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                </label>
+              )}
+            </div>
+
+            {/* PROCESS SETUP */}
+            <div className="px-4 pt-3 pb-3 border-b border-gray-100">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Process Setup</p>
+              <div className="space-y-2">
+                {manualGraphCrop && sourceGraphLines.length === 0 && (
+                  <div className="rounded-md border border-blue-100 bg-blue-50 px-2 py-1.5 text-[10px] font-medium text-blue-700">
+                    Manual graph crop selected: Y {Math.round(manualGraphCrop.top)} to {Math.round(manualGraphCrop.bottom)}
+                  </div>
+                )}
+                <button onClick={handleRunAI} disabled={!uploadedFile || isAnalyzing}
+                  className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-50">
+                  <svg className={`w-3.5 h-3.5 ${isAnalyzing ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                  {isAnalyzing ? "Starting…" : "Submit & Start"}
+                </button>
+                <p className="text-[10px] text-gray-400">Submit to start the automatic curve detection process.</p>
               </div>
-              {manualGraphCrop && sourceGraphLines.length === 0 && (
-                <div className="rounded-md border border-blue-100 bg-blue-50 px-2 py-1.5 text-[10px] font-medium text-blue-700">
-                  Manual graph crop selected: Y {Math.round(manualGraphCrop.top)} to {Math.round(manualGraphCrop.bottom)}
+            </div>
+
+            {/* GRAPHS DETECTED */}
+            <div className="px-4 pt-3 pb-4 flex-grow">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Curves Detected</p>
+                <span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded-full">{sourceGraphLines.length}</span>
+              </div>
+              {sourceGraphLines.length === 0 ? (
+                <p className="text-[10px] text-gray-400 italic">Run Smart Detection to detect curves.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {sourceGraphLines.map((line, idx) => {
+                    const vis = visibleGraphMap[idx] !== false;
+                    const lb = lineBounds(line, imageDimensions.width, imageDimensions.height);
+                    return (
+                      <div key={idx} className={`flex items-center justify-between py-1.5 px-2 rounded-lg border ${vis ? "border-gray-200 bg-gray-50" : "border-transparent"}`}>
+                        <div className="flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: curveColors[idx] || GRAPH_COLORS[idx % GRAPH_COLORS.length] }} />
+                          <div>
+                            <p className="text-xs font-semibold text-gray-800">{curveNames[idx] || `Graph ${gLabel(idx)}`}</p>
+                            <p className="text-[10px] text-gray-400">{line.length.toLocaleString()} pts</p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-4">
+                          <div className="space-y-1 text-[10px] text-gray-500">
+                            <div className="flex items-center justify-between">
+                              <span>Points</span>
+                              <span className="font-semibold text-gray-700">{line.length.toLocaleString()}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span>Bounds</span>
+                              <span className="font-semibold text-gray-700">{Math.round(lb.left)} × {Math.round(lb.top)}</span>
+                            </div>
+                          </div>
+
+                          <button onClick={() => setVisibleGraphMap(p => ({ ...p, [idx]: p[idx] === false }))}
+                            className="text-gray-400 hover:text-gray-700 p-0.5">
+                            {vis
+                              ? <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                              : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" /></svg>
+                            }
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
-              <button onClick={handleRunAI} disabled={!uploadedFile || isAnalyzing}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-50">
-                <svg className={`w-3.5 h-3.5 ${isAnalyzing ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                {isAnalyzing ? "Starting…" : "Submit & Start"}
-              </button>
-              <p className="text-[10px] text-gray-400">Enter total curves, submit, and the process will start automatically.</p>
             </div>
           </div>
-
-          {/* GRAPHS DETECTED */}
-          <div className="px-4 pt-3 pb-2 border-b border-gray-100">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Curves Detected</p>
-              <span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded-full">{sourceGraphLines.length}</span>
-            </div>
-            {sourceGraphLines.length === 0 ? (
-              <p className="text-[10px] text-gray-400 italic">Run Smart Detection to detect curves.</p>
-            ) : (
-              <div className="space-y-1.5">
-                {sourceGraphLines.map((line, idx) => {
-                  const vis = visibleGraphMap[idx] !== false;
-                  const lb = lineBounds(line, imageDimensions.width, imageDimensions.height);
-                  return (
-                    <div key={idx} className={`flex items-center justify-between py-1.5 px-2 rounded-lg border ${vis ? "border-gray-200 bg-gray-50" : "border-transparent"}`}>
-                      <div className="flex items-center gap-2">
-                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: GRAPH_COLORS[idx % GRAPH_COLORS.length] }} />
-                        <div>
-                          <p className="text-xs font-semibold text-gray-800">Graph {gLabel(idx)}</p>
-                          <p className="text-[10px] text-gray-400">{line.length.toLocaleString()} pts</p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-4">
-                        <div className="space-y-1 text-[10px] text-gray-500">
-                          <div className="flex items-center justify-between">
-                            <span>Points</span>
-                            <span className="font-semibold text-gray-700">{line.length.toLocaleString()}</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span>Bounds</span>
-                            <span className="font-semibold text-gray-700">{Math.round(lb.left)} × {Math.round(lb.top)}</span>
-                          </div>
-                        </div>
-
-                        <button onClick={() => setVisibleGraphMap(p => ({ ...p, [idx]: p[idx] === false }))}
-                          className="text-gray-400 hover:text-gray-700 p-0.5">
-                          {vis
-                            ? <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
-                            : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" /></svg>
-                          }
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* IMAGE DETAILS */}
-          <div className="px-4 pt-3 pb-3 flex-grow">
-            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Image Details</p>
-            <div className="space-y-2 text-[11px]">
-              {[
-                ["File Name", uploadedFile?.name ?? "–"],
-                ["Dimensions", imageDimensions.width ? `${imageDimensions.width}×${imageDimensions.height}px` : "–"],
-                ["File Size", uploadedFile ? `${(uploadedFile.size / 1024 / 1024).toFixed(2)} MB` : "–"],
-                ["Total Points", totalPoints.toLocaleString()],
-              ].map(([k, v]) => (
-                <div key={k} className="flex justify-between">
-                  <span className="text-gray-400">{k}</span>
-                  <span className="text-gray-700 font-medium truncate max-w-[90px]" title={v}>{v}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+        ) : null}
 
         {/* ── CANVAS AREA ──────────────────────────────────────────────────────── */}
         <div className="flex-1 relative overflow-hidden bg-gray-100"
@@ -2764,7 +2834,6 @@ export default function GraphTrackerV2() {
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
           onMouseLeave={handleCanvasLeave}
-          onWheel={onWheel}
           style={{ cursor: mode === "pan" ? (isPanning ? "grabbing" : "grab") : mode === "insert" ? "crosshair" : "default" }}>
           {imageUrl ? (
             <>
@@ -2779,25 +2848,76 @@ export default function GraphTrackerV2() {
               </div>
               
               {/* Guided Tracking View (Persistent) */}
-              <div className={`absolute inset-0 z-10 overflow-auto bg-gray-50 p-4 ${activeViewTab === "guided" ? "block" : "hidden"}`}>
+              <div className={`absolute inset-0 z-10 overflow-auto bg-gray-50 p-3 ${activeViewTab === "guided" ? "flex flex-col" : "hidden"}`}>
                 <HumanGuidedCurveTracker
                   imageUrl={imageUrl}
-                  onSave={(updatedLines) => {
+                  trackBounds={graphBoundaries}
+                  zoom={zoom}
+                  setZoom={setZoom}
+                  panOffset={panOffset}
+                  setPanOffset={setPanOffset}
+                  onSave={(updatedCurves) => {
                     setActiveViewTab("graph");
-                    if (!updatedLines || updatedLines.length === 0) return;
+                    if (!updatedCurves || updatedCurves.length === 0) return;
                     // For each curve traced, we add it to sourceGraphLines
                     const newLines = [...sourceGraphLines];
                     const newBounds = [...graphBoundaries];
+                    const newNames = [...curveNames];
+                    const newColors = [...curveColors];
+                    const newIds = [...curveIds];
                     
-                    updatedLines.forEach(curvePts => {
-                      if (curvePts.length > 0) {
+                    const newWrapLevels = [...curveWrapLevels];
+                    updatedCurves.forEach(curveObj => {
+                      // Build a break-separated polyline for wrap curves.
+                      // NEVER depth-sort across fragments — that creates horizontal jump lines.
+                      let curvePts, fragWrapLevels = null;
+                      if (curveObj.fragments && curveObj.fragments.length) {
+                        curvePts = [];
+                        fragWrapLevels = [];
+                        curveObj.fragments.forEach(f => {
+                          if (!f.points || f.points.length < 1) return;
+                          if (curvePts.length > 0) {
+                            curvePts.push(null);         // explicit BREAK between fragments
+                            fragWrapLevels.push(null);
+                          }
+                          f.points.forEach(p => {
+                            curvePts.push(p);
+                            fragWrapLevels.push(f.wrapLevel || 0);
+                          });
+                        });
+                      } else {
+                        curvePts = curveObj.points || curveObj;
+                      }
+                      const realPts = (curvePts || []).filter(Boolean);
+                      if (realPts.length === 0) return;
+
+                      const existingIdx = curveObj.id ? newIds.indexOf(curveObj.id) : -1;
+                      const W = imageDimensions.width;
+                      const H = imageDimensions.height;
+                      const bounds = lineBounds(realPts, W, H); // null-safe: only real points
+
+                      if (existingIdx !== -1) {
+                        // Update existing curve
+                        newLines[existingIdx] = curvePts;
+                        newNames[existingIdx] = curveObj.name || newNames[existingIdx];
+                        newColors[existingIdx] = curveObj.color || newColors[existingIdx];
+                        newBounds[existingIdx] = bounds;
+                        newWrapLevels[existingIdx] = fragWrapLevels;
+                      } else {
+                        // Insert new curve
                         newLines.push(curvePts);
-                        const W = imageDimensions.width;
-                        const H = imageDimensions.height;
-                        const bounds = lineBounds(curvePts, W, H);
+                        newNames.push(curveObj.name || `Curve ${newLines.length}`);
+                        newColors.push(curveObj.color || GRAPH_COLORS[(newLines.length - 1) % GRAPH_COLORS.length]);
+                        newIds.push(curveObj.id || `fallback-${Date.now()}-${Math.random()}`);
                         newBounds.push(bounds);
+                        newWrapLevels.push(fragWrapLevels);
                       }
                     });
+                    setCurveWrapLevels(newWrapLevels);
+                    
+                    setCurveNames(newNames);
+                    setCurveColors(newColors);
+                    setCurveIds(newIds);
                     
                     setSourceGraphLines(newLines);
                     setGraphBoundaries(newBounds);
@@ -2811,8 +2931,8 @@ export default function GraphTrackerV2() {
                         nextScales.push({
                           minValue: 0,
                           maxValue: 100,
-                          topDepth: depthScale.top,
-                          bottomDepth: depthScale.bottom,
+                          topDepth: depthScale?.top || 0,
+                          bottomDepth: depthScale?.bottom || 1000,
                         });
                       }
                       return nextScales;
@@ -2911,246 +3031,255 @@ export default function GraphTrackerV2() {
         </div>
 
         {/* ── RIGHT SIDEBAR ─────────────────────────────────────────────────────── */}
-        <div className="w-72 bg-white border-l border-gray-200 flex flex-col overflow-y-auto shrink-0">
-
-          {/* EXTRACTED CONTENT */}
-          <div className="px-4 pt-4 pb-3 border-b border-gray-100">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Extracted Content</p>
-              <span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded-full">{sourceGraphLines.length} graphs</span>
-            </div>
-
-            <div className="grid grid-cols-2 gap-1.5 mb-3">
-              {[
-                { key: "header", label: "Header" },
-                { key: "graphs", label: "Graphs" },
-              ].map(tab => (
-                <button key={tab.key} onClick={() => setRightPanelTab(tab.key)}
-                  className={`px-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors ${rightPanelTab === tab.key ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}`}>
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-
-            {rightPanelTab === "header" ? (
-              <div className="space-y-3">
-                <div className="rounded-lg border border-gray-200 bg-gray-50 p-2">
-                  {headerImageUrl ? (
-                    <img src={headerImageUrl} alt="Header preview" className="w-full rounded-md object-contain max-h-40" />
-                  ) : (
-                    <div className="flex h-32 items-center justify-center rounded-md border border-dashed border-gray-300 text-[10px] text-gray-400 text-center px-3">
-                      Header OCR preview will appear here after detection.
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-lg border border-blue-100 bg-blue-50 p-2.5">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <span className="text-[10px] font-bold uppercase tracking-wide text-blue-700">Header OCR</span>
-                    <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-blue-700">
-                      {headerAccuracyLabel}
-                    </span>
-                  </div>
-                  <button
-                    onClick={openHeaderOcrViewer}
-                    className="w-full rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow-sm hover:bg-blue-700">
-                    View / Edit Header Content
-                  </button>
-                  <p className="mt-1.5 text-[10px] font-medium text-blue-700">
-                    {savedHeaderText ? "Saved header text will be used in LAS export." : "Open to verify OCR text before LAS export."}
-                  </p>
-                </div>
-
-                <div className="space-y-1.5">
-                  {headerPreviewFields.map(([label, value]) => (
-                    <div key={label} className="flex items-center justify-between gap-3 rounded-md bg-gray-50 px-2.5 py-1.5">
-                      <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">{label}</span>
-                      <span className="text-[10px] font-medium text-gray-800 text-right truncate max-w-[130px]" title={value}>{value}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {graphSummaryItems.length === 0 ? (
-                  <p className="text-[10px] text-gray-400 italic">No graphs detected yet.</p>
-                ) : (
-                  graphSummaryItems.map(item => (
-                    <div key={item.label} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className="flex items-center gap-2">
-                          <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                          <p className="text-xs font-semibold text-gray-800">{item.label}</p>
-                        </div>
-                        <button onClick={() => setVisibleGraphMap(p => ({ ...p, [item.index]: p[item.index] === false }))} className="text-gray-400 hover:text-gray-700">
-                          {visibleGraphMap[item.index] !== false
-                            ? <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
-                            : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" /></svg>
-                          }
-                        </button>
-                      </div>
-                      <div className="space-y-1">
-                        <div className="flex items-center justify-between text-[10px] text-gray-500">
-                          <span>Points</span>
-                          <span className="font-semibold text-gray-700">{item.points.toLocaleString()}</span>
-                        </div>
-                        <div className="flex items-center justify-between text-[10px] text-gray-500">
-                          <span>Bounds</span>
-                          <span className="font-semibold text-gray-700">{Math.round(item.bounds.left)} × {Math.round(item.bounds.top)}</span>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* GRAPH BOUNDARIES */}
-          <div className="px-4 pt-3 pb-3 border-b border-gray-100 flex-grow">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Graph Boundaries</p>
-              <button onClick={() => setShowHelp(true)}>
-                <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+        {showRightMenu ? (
+          <div className="absolute top-4 right-4 z-20 w-80 bg-white/95 backdrop-blur-sm border border-gray-200 rounded-2xl shadow-xl flex flex-col max-h-[calc(100%-2rem)] overflow-y-auto transition-all duration-300 ease-in-out">
+            {/* Title bar */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-150 shrink-0">
+              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Details</span>
+              <button onClick={() => setShowRightMenu(false)} className="text-gray-400 hover:text-gray-650 font-bold text-xs p-1">
+                ✕
               </button>
             </div>
-            <label className="mb-3 flex items-center gap-2 rounded-md bg-gray-50 px-2.5 py-2 text-[10px] font-semibold text-gray-600">
-              <input
-                type="checkbox"
-                checked={showDebugOverlay}
-                onChange={e => setShowDebugOverlay(e.target.checked)}
-                className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-              Show debug overlay
-            </label>
 
-            {sourceGraphLines.length === 0
-              ? <p className="text-[10px] text-gray-400 italic">Detect graphs to set boundaries.</p>
-              : (
-                <div className="space-y-4">
-                  <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide">
-                    Mouse selection target
-                    <select
-                      value={activeBoundaryIdx}
-                      onChange={e => setActiveBoundaryIdx(Number(e.target.value))}
-                      className="mt-1 w-full border border-gray-200 rounded-md px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400">
-                      {sourceGraphLines.map((_, i) => (
-                        <option key={i} value={i}>Graph {gLabel(i)}</option>
-                      ))}
-                    </select>
-                  </label>
-                  {sourceGraphLines.map((_, idx) => {
-                    if (visibleGraphMap[idx] === false) return null;
-                    const b = graphBoundaryView[idx] || {};
-                    return (
-                      <div key={idx}>
-                        <div className="flex items-center gap-1.5 mb-2">
-                          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: GRAPH_COLORS[idx % GRAPH_COLORS.length] }} />
-                          <span className="text-xs font-bold text-gray-700">Graph {gLabel(idx)} <span className="font-normal text-gray-400">({COLORS_NAMED[idx] ?? ""})</span></span>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          {[
-                            { field: "left", label: "Left X" },
-                            { field: "top", label: "Top Y" },
-                            { field: "right", label: "Right X" },
-                            { field: "bottom", label: "Bot. Y" },
-                          ].map(({ field, label }) => (
-                            <div key={field} className="flex flex-col gap-0.5">
-                              <label className="text-[9px] text-gray-400 font-medium uppercase">{label}</label>
-                              <input
-                                type="number"
-                                value={Math.round(b[field] ?? 0)}
-                                onChange={e => handleBoundaryChange(idx, field, e.target.value)}
-                                className="border border-gray-200 rounded-md px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400"
-                              />
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
+            {/* EXTRACTED CONTENT */}
+            <div className="px-4 pt-4 pb-3 border-b border-gray-100">
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Extracted Content</p>
+                <span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded-full">{sourceGraphLines.length} graphs</span>
+              </div>
 
-                  <button onClick={handleApplyBoundaries}
-                    className="w-full py-2 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition-colors shadow-sm">
-                    Apply Boundaries
+              <div className="grid grid-cols-2 gap-1.5 mb-3">
+                {[
+                  { key: "header", label: "Header" },
+                  { key: "graphs", label: "Graphs" },
+                ].map(tab => (
+                  <button key={tab.key} onClick={() => setRightPanelTab(tab.key)}
+                    className={`px-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors ${rightPanelTab === tab.key ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}`}>
+                    {tab.label}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowWorkflowInstructions(true)}
-                    className="w-full flex items-center justify-center gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
-                    title="How to use Apply Boundaries">
-                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M12 21a9 9 0 100-18 9 9 0 000 18z" />
-                    </svg>
-                    How to use Apply Boundaries
-                  </button>
-                  <div className="rounded-md bg-gray-50 px-2.5 py-2 text-[10px] font-medium text-gray-500">
-                    {depthScale ? (
-                      <div className="space-y-1">
-                        <div className="font-bold text-green-700">Scale applied. Export step: 0.50 ft</div>
-                        {gridInfo.slice(0, 2).map((grid, idx) => (
-                          <div key={idx}>Graph {gLabel(idx)} grid: {grid.hDivisions} rows x {grid.vDivisions} cols</div>
-                        ))}
-                      </div>
-                    ) : appliedGraphBoundaries.length ? (
-                      "Boundaries are frozen. Complete the scale modal to enable LAS export."
+                ))}
+              </div>
+
+              {rightPanelTab === "header" ? (
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-2">
+                    {headerImageUrl ? (
+                      <img src={headerImageUrl} alt="Header preview" className="w-full rounded-md object-contain max-h-40" />
                     ) : (
-                      "Click Apply Boundaries to freeze/crop graph regions before export."
+                      <div className="flex h-32 items-center justify-center rounded-md border border-dashed border-gray-300 text-[10px] text-gray-400 text-center px-3">
+                        Header OCR preview will appear here after detection.
+                      </div>
                     )}
                   </div>
-                </div>
-              )
-            }
-          </div>
 
-          {/* EXPORT */}
-          <div className="px-4 pt-3 pb-4">
-            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">LAS Export</p>
-            <button onClick={exportAs}
-              disabled={!appliedGraphBoundaries.length || !axisScales.length || !depthScale}
-              className={`w-full flex items-center justify-center gap-2 py-2 px-3 border rounded-lg transition-colors text-xs font-semibold ${
-                appliedGraphBoundaries.length && axisScales.length && depthScale
-                  ? "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
-                  : "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
-              }`}>
-              <span className="text-base">📦</span>
-              Export LAS
-            </button>
-            <div className="download-header-wrapper relative mt-2">
-              <button
-                type="button"
-                onClick={() => setShowDownloadMenu(prev => !prev)}
-                className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-gray-900 text-white border border-gray-900 rounded-lg hover:bg-gray-800 transition-colors text-xs font-semibold">
-                Download Header
-                <span className="text-[10px]">{showDownloadMenu ? "▲" : "▼"}</span>
-              </button>
-              {showDownloadMenu && (
-                <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl">
-                  <button
-                    type="button"
-                    onClick={() => handleDownloadHeader("pdf")}
-                    className="block w-full px-3 py-2 text-left text-xs font-semibold text-gray-700 hover:bg-gray-50">
-                    PDF
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDownloadHeader("docx")}
-                    className="block w-full border-t border-gray-100 px-3 py-2 text-left text-xs font-semibold text-gray-700 hover:bg-gray-50">
-                    Word (.docx)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDownloadHeader("xlsx")}
-                    className="block w-full border-t border-gray-100 px-3 py-2 text-left text-xs font-semibold text-gray-700 hover:bg-gray-50">
-                    Excel (.xlsx)
-                  </button>
+                  <div className="rounded-lg border border-blue-100 bg-blue-50 p-2.5">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wide text-blue-700">Header OCR</span>
+                      <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-blue-700">
+                        {headerAccuracyLabel}
+                      </span>
+                    </div>
+                    <button
+                      onClick={openHeaderOcrViewer}
+                      className="w-full rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow-sm hover:bg-blue-700">
+                      View / Edit Header Content
+                    </button>
+                    <p className="mt-1.5 text-[10px] font-medium text-blue-700">
+                      {savedHeaderText ? "Saved header text will be used in LAS export." : "Open to verify OCR text before LAS export."}
+                    </p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {headerPreviewFields.map(([label, value]) => (
+                      <div key={label} className="flex items-center justify-between gap-3 rounded-md bg-gray-50 px-2.5 py-1.5">
+                        <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">{label}</span>
+                        <span className="text-[10px] font-medium text-gray-800 text-right truncate max-w-[130px]" title={value}>{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {graphSummaryItems.length === 0 ? (
+                    <p className="text-[10px] text-gray-400 italic">No graphs detected yet.</p>
+                  ) : (
+                    graphSummaryItems.map(item => (
+                      <div key={item.label} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+                            <p className="text-xs font-semibold text-gray-800">{item.label}</p>
+                          </div>
+                          <button onClick={() => setVisibleGraphMap(p => ({ ...p, [item.index]: p[item.index] === false }))} className="text-gray-400 hover:text-gray-700">
+                            {visibleGraphMap[item.index] !== false
+                              ? <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                              : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" /></svg>
+                            }
+                          </button>
+                        </div>
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-[10px] text-gray-500">
+                            <span>Points</span>
+                            <span className="font-semibold text-gray-700">{item.points.toLocaleString()}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-[10px] text-gray-500">
+                            <span>Bounds</span>
+                            <span className="font-semibold text-gray-700">{Math.round(item.bounds.left)} × {Math.round(item.bounds.top)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
               )}
             </div>
-            <p className="mt-2 text-[10px] text-gray-400">Boundary points can be edited before generating the LAS file.</p>
-          </div>
 
-        </div>
+            {/* GRAPH BOUNDARIES */}
+            <div className="px-4 pt-3 pb-3 border-b border-gray-100 flex-grow">
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Graph Boundaries</p>
+                <button onClick={() => setShowHelp(true)}>
+                  <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                </button>
+              </div>
+              <label className="mb-3 flex items-center gap-2 rounded-md bg-gray-50 px-2.5 py-2 text-[10px] font-semibold text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={showDebugOverlay}
+                  onChange={e => setShowDebugOverlay(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                Show debug overlay
+              </label>
+
+              {sourceGraphLines.length === 0
+                ? <p className="text-[10px] text-gray-400 italic">Detect graphs to set boundaries.</p>
+                : (
+                  <div className="space-y-4">
+                    <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide">
+                      Mouse selection target
+                      <select
+                        value={activeBoundaryIdx}
+                        onChange={e => setActiveBoundaryIdx(Number(e.target.value))}
+                        className="mt-1 w-full border border-gray-200 rounded-md px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400">
+                        {sourceGraphLines.map((_, i) => (
+                          <option key={i} value={i}>Graph {gLabel(i)}</option>
+                        ))}
+                      </select>
+                    </label>
+                    {sourceGraphLines.map((_, idx) => {
+                      if (visibleGraphMap[idx] === false) return null;
+                      const b = graphBoundaryView[idx] || {};
+                      return (
+                        <div key={idx}>
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: curveColors[idx] || GRAPH_COLORS[idx % GRAPH_COLORS.length] }} />
+                            <span className="text-xs font-bold text-gray-700">{curveNames[idx] || `Graph ${gLabel(idx)}`} {!curveColors[idx] && <span className="font-normal text-gray-400">({COLORS_NAMED[idx] ?? ""})</span>}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            {[
+                              { field: "left", label: "Left X" },
+                              { field: "top", label: "Top Y" },
+                              { field: "right", label: "Right X" },
+                              { field: "bottom", label: "Bot. Y" },
+                            ].map(({ field, label }) => (
+                              <div key={field} className="flex flex-col gap-0.5">
+                                <label className="text-[9px] text-gray-400 font-medium uppercase">{label}</label>
+                                <input
+                                  type="number"
+                                  value={Math.round(b[field] ?? 0)}
+                                  onChange={e => handleBoundaryChange(idx, field, e.target.value)}
+                                  className="border border-gray-200 rounded-md px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    <button onClick={handleApplyBoundaries}
+                      className="w-full py-2 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition-colors shadow-sm">
+                      Apply Boundaries
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowWorkflowInstructions(true)}
+                      className="w-full flex items-center justify-center gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
+                      title="How to use Apply Boundaries">
+                      <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M12 21a9 9 0 100-18 9 9 0 000 18z" />
+                      </svg>
+                      How to use Apply Boundaries
+                    </button>
+                    <div className="rounded-md bg-gray-50 px-2.5 py-2 text-[10px] font-medium text-gray-500">
+                      {depthScale ? (
+                        <div className="space-y-1">
+                          <div className="font-bold text-green-700">Scale applied. Export step: 0.50 ft</div>
+                          {gridInfo.slice(0, 2).map((grid, idx) => (
+                            <div key={idx}>Graph {gLabel(idx)} grid: {grid.hDivisions} rows x {grid.vDivisions} cols</div>
+                          ))}
+                        </div>
+                      ) : appliedGraphBoundaries.length ? (
+                        "Boundaries are frozen. Complete the scale modal to enable LAS export."
+                      ) : (
+                        "Click Apply Boundaries to freeze/crop graph regions before export."
+                      )}
+                    </div>
+                  </div>
+                )
+              }
+            </div>
+
+            {/* EXPORT */}
+            <div className="px-4 pt-3 pb-4">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">LAS Export</p>
+              <button onClick={exportAs}
+                disabled={!appliedGraphBoundaries.length || !axisScales.length || !depthScale}
+                className={`w-full flex items-center justify-center gap-2 py-2 px-3 border rounded-lg transition-colors text-xs font-semibold ${
+                  appliedGraphBoundaries.length && axisScales.length && depthScale
+                    ? "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
+                    : "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                }`}>
+                <span className="text-base">📦</span>
+                Export LAS
+              </button>
+              <div className="download-header-wrapper relative mt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDownloadMenu(prev => !prev)}
+                  className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-gray-900 text-white border border-gray-900 rounded-lg hover:bg-gray-800 transition-colors text-xs font-semibold">
+                  Download Header
+                  <span className="text-[10px]">{showDownloadMenu ? "▲" : "▼"}</span>
+                </button>
+                {showDownloadMenu && (
+                  <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl">
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadHeader("pdf")}
+                      className="block w-full px-3 py-2 text-left text-xs font-semibold text-gray-700 hover:bg-gray-50">
+                      PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadHeader("docx")}
+                      className="block w-full border-t border-gray-100 px-3 py-2 text-left text-xs font-semibold text-gray-700 hover:bg-gray-50">
+                      Word (.docx)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadHeader("xlsx")}
+                      className="block w-full border-t border-gray-100 px-3 py-2 text-left text-xs font-semibold text-gray-700 hover:bg-gray-50">
+                      Excel (.xlsx)
+                    </button>
+                  </div>
+                )}
+              </div>
+              <p className="mt-2 text-[10px] text-gray-400">Boundary points can be edited before generating the LAS file.</p>
+            </div>
+
+          </div>
+        ) : null}
       </div>
     </div>
   );
