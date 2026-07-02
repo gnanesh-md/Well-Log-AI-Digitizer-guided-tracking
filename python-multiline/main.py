@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import tempfile
 from PIL import Image
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from torchvision import transforms
@@ -26,7 +26,7 @@ from boxRemoval import process_one_image
 from tiff_chunk_detect import process_tiff_bytes_for_backend, process_image_for_backend, load_tiff_pages_from_bytes
 from curve_value_matcher import CurveValueMatcher, create_curve_info
 from graph_vision_analyzer import GraphVisionAnalyzer
-from header_ocr_engine import extract_header_text_with_ollama
+from header_ocr_engine import extract_header_text_with_vllm
 
 # NOTE: OCR integration (easyocr / ollama / gemini / openai header OCR) has been
 # removed for lightweight CPU-only systems. To re-integrate later, restore the
@@ -46,7 +46,7 @@ app.include_router(guided_curve_router)
 YOLO_MODEL_PATH=os.getenv("YOLO_MODEL_PATH")
 TIFF_CHUNK_MODEL_PATH = os.getenv("TIFF_CHUNK_MODEL_PATH") or "best.pt"
 # OCR model configured
-HEADER_OCR_MODEL = "qwen2.5vl:32b"
+HEADER_OCR_MODEL = "qwen2.5-vl-7b"
 
 # Pipeline mode: True = SVM+UNet, False = direct thresholding on cleaned image.
 # The checked-in model files may be Git LFS pointers, so default to the
@@ -995,8 +995,8 @@ def extract_las_header(image):
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         else:
             image_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-            
-        header_text, metadata = extract_header_text_with_ollama(image_rgb, model_name=HEADER_OCR_MODEL)
+        # 3. Extract header text using vLLM
+        header_text, metadata = extract_header_text_with_vllm(image_rgb, model_name=HEADER_OCR_MODEL)
         las_header = parse_well_log_ocr_to_las_header(header_text)
         return las_header, header_text, metadata
     except Exception as e:
@@ -1494,7 +1494,21 @@ def decode_upload_image(data, ext):
     if ext in ("tif", "tiff"):
         try:
             with Image.open(io.BytesIO(data)) as image:
-                return np.array(image.convert("RGB"))
+                frames = []
+                for i in range(getattr(image, 'n_frames', 1)):
+                    image.seek(i)
+                    frames.append(np.array(image.convert("RGB")))
+                if frames:
+                    if len(frames) == 1:
+                        return frames[0]
+                    max_w = max(f.shape[1] for f in frames)
+                    padded = []
+                    for f in frames:
+                        if f.shape[1] < max_w:
+                            pad_width = ((0, 0), (0, max_w - f.shape[1]), (0, 0))
+                            f = np.pad(f, pad_width, mode='constant', constant_values=255)
+                        padded.append(f)
+                    return np.vstack(padded)
         except Exception as e:
             print(f"[WARN] Pillow TIFF decode failed, trying OpenCV: {e}")
 
@@ -1719,7 +1733,44 @@ def pixel_y_to_depth(pixel_y, top_pixel, bottom_pixel, top_depth, bottom_depth):
     return top_depth + ratio * (bottom_depth - top_depth)
 
 
-def pixel_points_to_physical(points, pixel_bounds, x_range, y_range, wrap_levels=None):
+def _unwrap_pixel_x_values(points, left, right, min_value, max_value, wrap_jump_frac=0.55, edge_frac=0.40, clamp_to_span=True):
+    width = float(right) - float(left)
+    vl = float(min_value)
+    vr = float(max_value)
+    
+    if width == 0:
+        return [vl for _ in points]
+        
+    span = vr - vl
+    vlo = min(vl, vr)
+    vhi = max(vl, vr)
+    
+    valid_pts = [(i, p[0], p[1]) for i, p in enumerate(points) if p is not None]
+    sorted_pts = sorted(valid_pts, key=lambda x: x[2])
+    
+    wrap_level = 0
+    prev_frac = None
+    results = [None] * len(points)
+    
+    for idx, px, py in sorted_pts:
+        frac = (float(px) - float(left)) / width
+        base = vl + frac * span
+        if clamp_to_span:
+            base = max(vlo, min(vhi, base))
+            
+        if prev_frac is not None:
+            d_frac = frac - prev_frac
+            if d_frac < -wrap_jump_frac and prev_frac > 1 - edge_frac and frac < edge_frac:
+                wrap_level += 1
+            elif d_frac > wrap_jump_frac and prev_frac < edge_frac and frac > 1 - edge_frac:
+                wrap_level -= 1
+                
+        prev_frac = frac
+        results[idx] = base + wrap_level * span
+        
+    return results
+
+def pixel_points_to_physical(points, pixel_bounds, x_range, y_range, wrap_levels=None, wrap_aware=True):
     """Convert tracked pixel points to [physical_value, real_depth] pairs.
     
     If wrap_levels is provided (list aligned to points, None at break markers),
@@ -1739,16 +1790,26 @@ def pixel_points_to_physical(points, pixel_bounds, x_range, y_range, wrap_levels
     value_range = max_value - min_value
 
     converted = []
+    
+    if wrap_aware and wrap_levels is None:
+        unwrapped_values = _unwrap_pixel_x_values(points, left, right, min_value, max_value)
+    else:
+        unwrapped_values = None
+
     for i, pt in enumerate(points):
         if pt is None:
             continue  # skip break markers
         pixel_x, pixel_y = pt[0], pt[1]
-        base_value = pixel_x_to_physical(pixel_x, left, right, min_value, max_value)
-        wrap_level = 0
-        if wrap_levels is not None and i < len(wrap_levels) and wrap_levels[i] is not None:
-            wrap_level = int(wrap_levels[i])
-        # Apply wrap-level offset: NOT clamped — values intentionally exceed [min, max]
-        physical_value = base_value + wrap_level * value_range
+        
+        if unwrapped_values is not None and unwrapped_values[i] is not None:
+            physical_value = unwrapped_values[i]
+        else:
+            base_value = pixel_x_to_physical(pixel_x, left, right, min_value, max_value)
+            wrap_level = 0
+            if wrap_levels is not None and i < len(wrap_levels) and wrap_levels[i] is not None:
+                wrap_level = int(wrap_levels[i])
+            physical_value = base_value + wrap_level * value_range
+            
         converted.append([
             physical_value,
             pixel_y_to_depth(pixel_y, top, bottom, top_depth, bottom_depth),
@@ -2131,7 +2192,7 @@ def extract_values_from_las_style_header_text(header_text):
         if not match:
             continue
         mnemonic = HEADER_TEXT_KEY_TO_MNEMONIC.get(normalize_header_text_key(match.group(1)))
-        value = clean_las_header_value(match.group(3))
+        value = clean_las_header_value(match.group(3)) 
         if mnemonic and value:
             values[mnemonic] = value
     return values
@@ -2219,6 +2280,17 @@ def prepend_las_header_comments(las_text, header_ocr_text=""):
     comment_lines.append("#")
     return "\n".join(comment_lines) + "\n" + las_text
 
+@app.post("/convert-image")
+async def convert_image(file: UploadFile = File(...)):
+    ext = file.filename.lower().rsplit(".", 1)[-1]
+    data = await file.read()
+    img = decode_upload_image(data, ext)
+    if img is None:
+        raise HTTPException(400, "Failed to decode image")
+    
+    _, encoded = cv2.imencode('.webp', cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_WEBP_QUALITY, 90])
+    return Response(content=encoded.tobytes(), media_type="image/webp")
+
 @app.post("/segment-and-graph")
 async def segment_and_graph(
     file: UploadFile = File(...),
@@ -2258,10 +2330,8 @@ async def segment_and_graph(
             manual_graph_box=manual_box,
         )
         header_image = crop_box(img, layout_info["header_box"])
-        # Free original full-resolution image to conserve memory
-        del img
-        import gc
-        gc.collect()
+        # Kept original full-resolution image in memory to return complete view
+        pass
     except Exception as e:
         print(f"[WARN] Header/layout extraction failed, using full-page fallback: {e}")
         layout_info = detect_layout_with_density(img)
@@ -2277,10 +2347,8 @@ async def segment_and_graph(
             "error": str(e),
         }
         depth_ticks = []
-        # Free original full-resolution image to conserve memory
-        del img
-        import gc
-        gc.collect()
+        # Kept original full-resolution image in memory to return complete view
+        pass
 
     image_for_curve_pipeline = image_without_b
     tiff_preprocessing_info = None
@@ -2382,7 +2450,32 @@ async def segment_and_graph(
             f"{depth_range['top']} {depth_range['unit']} -> {depth_range['bottom']} {depth_range['unit']}"
         )
     
-    image_b64 = encode_png_base64(image_without_b)
+    # ── FIX: Return full stitched image for frontend, and offset coordinates ──
+    try:
+        y_offset = int(layout_info["graph_box"]["y1"])
+        x_offset = int(layout_info["graph_box"]["x1"])
+        
+        # Paste cleaned graph back into full image
+        h_cropped, w_cropped = image_without_b.shape[:2]
+        img[y_offset:y_offset + h_cropped, x_offset:x_offset + w_cropped] = image_without_b
+
+        if y_offset > 0 or x_offset > 0:
+            for k, pts in graph_points.items():
+                graph_points[k] = [
+                    [p[0] + x_offset, p[1] + y_offset] if p is not None else None 
+                    for p in pts
+                ]
+            for b in graph_boundaries:
+                b["left"] += x_offset
+                b["right"] += x_offset
+                b["top"] += y_offset
+                b["bottom"] += y_offset
+
+        image_b64 = encode_png_base64(img)
+    except Exception as e:
+        print(f"[WARN] Failed to merge full image, falling back to cropped: {e}")
+        image_b64 = encode_png_base64(image_without_b)
+
     header_b64 = encode_png_base64(header_image)
 
     return JSONResponse({
@@ -2394,8 +2487,8 @@ async def segment_and_graph(
         "curve_value_match": curve_value_match,
         "graph_vision": graph_vision,
         "image_dimensions": {
-            "width": original_width,
-            "height": original_height
+            "width": img.shape[1] if 'img' in locals() else original_width,
+            "height": img.shape[0] if 'img' in locals() else original_height
         },
         "layout": layout_info,
         "las_headers": las_file_header,
@@ -2561,6 +2654,66 @@ async def create_las_file(
         raise HTTPException(500, f"Failed to create LAS file: {str(e)}")
 
 
+def merge_curve_pieces(lines_dict, depth_step=0.5):
+    import numpy as np
+    from scipy.interpolate import interp1d
+    groups = {}
+    for line_name, (depths, values) in lines_dict.items():
+        base_name = line_name.split('_')[0]
+        try:
+            piece_idx = int(line_name.split('_')[-1]) if '_' in line_name else 0
+        except ValueError:
+            piece_idx = 0
+            
+        if base_name not in groups:
+            groups[base_name] = []
+        groups[base_name].append((piece_idx, line_name, np.array(depths, dtype=float), np.array(values, dtype=float)))
+        
+    merged_dict = {}
+    for base_name, pieces in groups.items():
+        if len(pieces) == 1:
+            _, line_name, depths, values = pieces[0]
+            merged_dict[line_name] = (depths.tolist(), values.tolist())
+            continue
+            
+        pieces.sort(key=lambda x: x[0], reverse=True)
+        all_depths = np.concatenate([p[2] for p in pieces])
+        start_depth = float(np.nanmin(all_depths))
+        stop_depth = float(np.nanmax(all_depths))
+        
+        ref_depth_array = np.arange(start_depth, stop_depth + depth_step * 0.5, depth_step, dtype=float)
+        merged_values = np.full_like(ref_depth_array, -999.25)
+        
+        pieces.sort(key=lambda x: x[0])
+        for piece_idx, line_name, depths, values in pieces:
+            valid = np.isfinite(depths) & np.isfinite(values)
+            if not np.any(valid): continue
+            
+            d, v = depths[valid], values[valid]
+            order = np.argsort(d)
+            d, v = d[order], v[order]
+            
+            unique_d, inverse = np.unique(np.round(d, 6), return_inverse=True)
+            mean_v = np.zeros_like(unique_d, dtype=float)
+            for uidx in range(len(unique_d)):
+                mean_v[uidx] = float(np.nanmedian(v[inverse == uidx]))
+                
+            if len(unique_d) == 1:
+                diff = np.abs(ref_depth_array - unique_d[0])
+                if np.min(diff) <= depth_step:
+                    idx = np.argmin(diff)
+                    merged_values[idx] = mean_v[0]
+            else:
+                f_interp = interp1d(unique_d, mean_v, bounds_error=False, fill_value=np.nan)
+                interp_v = f_interp(ref_depth_array)
+                mask = ~np.isnan(interp_v)
+                merged_values[mask] = interp_v[mask]
+                
+        merged_dict[base_name] = (ref_depth_array.tolist(), merged_values.tolist())
+        
+    return merged_dict
+
+
 @app.post("/generate-las-base64")
 async def generate_las(request: Request):
     try:
@@ -2603,6 +2756,9 @@ async def generate_las(request: Request):
             depths = [pt[1] for pt in sorted_points]
             values = [pt[0] for pt in sorted_points]
             curves_dict[line_name] = (depths, values)
+
+        # Merge pieces
+        curves_dict = merge_curve_pieces(curves_dict, depth_step=depth_step)
 
         # Create LAS object
         las = create_las_with_dict(

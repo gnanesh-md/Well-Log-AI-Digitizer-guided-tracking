@@ -5,14 +5,15 @@ from typing import Optional
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
+import base64
 try:
-    import ollama
-except Exception:
-    ollama = None
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 
 MIN_DIM = 800
-DEFAULT_MODEL = "qwen2.5-vl:32b"
+DEFAULT_MODEL = "qwen2.5-vl-7b"
 MODEL_OPTIONS = {
   "temperature": 0,
     "num_ctx": 4096,
@@ -184,26 +185,31 @@ def score_header_text(text: str) -> tuple[float, dict]:
     }
 
 
-def extract_header_text_with_ollama(
+def extract_header_text_with_vllm(
     image_rgb,
     model_name: str = DEFAULT_MODEL,
     prompt: str = WELL_LOG_HEADER_OCR_PROMPT,
 ) -> tuple[str, dict]:
-    if ollama is None:
+    if OpenAI is None:
         return "", {
-            "engine": "ollama",
+            "engine": "vllm",
             "model": model_name,
             "strategy": None,
-            "status": "unavailable",
-            "error": "ollama package is not installed",
+            "status": "failed",
+            "error": "openai python package is not installed",
         }
 
     raw_img = Image.fromarray(image_rgb).convert("RGB")
     last_error: Optional[str] = None
-    max_dim = 2560
+    max_dim = 1024
 
     best_text = ""
     best_metadata = None
+
+    client = OpenAI(
+        base_url="http://localhost:8700/v1",
+        api_key="vllm"
+    )
 
     for strategy_name, strategy_fn in STRATEGIES:
         try:
@@ -214,22 +220,30 @@ def extract_header_text_with_ollama(
                 candidate = candidate.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
 
             processed = strategy_fn(candidate)
-            response = ollama.chat(
+            base64_image = base64.b64encode(_image_to_jpeg_bytes(processed)).decode("utf-8")
+            
+            response = client.chat.completions.create(
                 model=model_name,
                 messages=[{
                     "role": "user",
-                    "content": prompt,
-                    "images": [
-                        (print("DEBUG OLLAMA IMAGE SIZE:", processed.size, flush=True), _image_to_jpeg_bytes(processed))[1]
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
                     ],
                 }],
-                options=MODEL_OPTIONS,
+                temperature=0,
+                max_tokens=2048,
             )
-            text = clean_output(response.get("message", {}).get("content", ""))
+            text = clean_output(response.choices[0].message.content)
             if text and len(text.strip()) >= 5:
                 score, score_metadata = score_header_text(text)
                 metadata = {
-                    "engine": "ollama",
+                    "engine": "vllm",
                     "model": model_name,
                     "strategy": strategy_name,
                     "status": "success",
@@ -240,7 +254,7 @@ def extract_header_text_with_ollama(
                     best_metadata = metadata
         except Exception as e:
             import traceback
-            print("OLLAMA ERROR TRACEBACK:", traceback.format_exc(), flush=True)
+            print("VLLM ERROR TRACEBACK:", traceback.format_exc(), flush=True)
             last_error = str(e)
             continue
 
@@ -248,7 +262,7 @@ def extract_header_text_with_ollama(
         return best_text, best_metadata
 
     return "", {
-        "engine": "ollama",
+        "engine": "vllm",
         "model": model_name,
         "strategy": None,
         "status": "failed",

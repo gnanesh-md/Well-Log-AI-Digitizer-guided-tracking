@@ -2,6 +2,8 @@ import React, { useState, useCallback, useMemo, useRef, useEffect } from "react"
 import GraphLoadingSpinner from './GraphLoadingSpinner';
 import HumanGuidedCurveTracker from './HumanGuidedCurveTracker';
 import drakeAiLogo from "../../assets/logo.png";
+import { resampleWrappedCurve } from './wrappingValues';
+import { useNavigate } from 'react-router-dom';
 
 // Export Modal for editing boundaries before export
 function ExportModal({ open, onClose, boundaries, onExport, graphLabels, autoDepthRange, graphScales }) {
@@ -15,6 +17,8 @@ function ExportModal({ open, onClose, boundaries, onExport, graphLabels, autoDep
     bottomDepth: graphScales[idx]?.bottomDepth ?? autoDepthRange?.bottom ?? DEFAULT_Y_RANGE[1],
     depthUnit: "FT",
     depthStep: 0.5,
+    wrapGroup: graphScales[idx]?.wrapGroup || 0,
+    scaleType: graphScales[idx]?.scaleType || 'linear',
   })), [boundaries, graphLabels, autoDepthRange, graphScales]);
   const [editedBounds, setEditedBounds] = useState(buildRows);
   useEffect(() => { setEditedBounds(buildRows()); }, [buildRows]);
@@ -23,6 +27,37 @@ function ExportModal({ open, onClose, boundaries, onExport, graphLabels, autoDep
     const nextValue = numericFields.has(field) ? Number(val) : val;
     if (numericFields.has(field) && !Number.isFinite(nextValue)) return;
     setEditedBounds(prev => prev.map((b, i) => i === idx ? { ...b, [field]: nextValue } : b));
+  };
+  const handleToggleWrap = (idx) => {
+    setEditedBounds(prev => {
+      const currentVal = prev[idx].wrapGroup || 0;
+      if (currentVal > 0) {
+        return prev.map((b, i) => i === idx ? { ...b, wrapGroup: 0 } : b);
+      } else {
+        const counts = {};
+        let maxGroup = 0;
+        prev.forEach((b, i) => {
+          if (i !== idx && b.wrapGroup > 0) {
+            counts[b.wrapGroup] = (counts[b.wrapGroup] || 0) + 1;
+            if (b.wrapGroup > maxGroup) maxGroup = b.wrapGroup;
+          }
+        });
+        
+        let targetGroup = null;
+        for (let g = 1; g <= maxGroup; g++) {
+          if (counts[g] === 1) {
+            targetGroup = g;
+            break;
+          }
+        }
+        
+        if (targetGroup === null) {
+          targetGroup = maxGroup + 1;
+        }
+        
+        return prev.map((b, i) => i === idx ? { ...b, wrapGroup: targetGroup } : b);
+      }
+    });
   };
   if (!open) return null;
   return (
@@ -38,9 +73,35 @@ function ExportModal({ open, onClose, boundaries, onExport, graphLabels, autoDep
           <div className="space-y-3">
             {editedBounds.map((b, idx) => (
               <div key={idx} className="rounded-xl border border-gray-200 p-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="text-xs font-bold text-gray-800">Graph {graphLabels[idx]}</span>
-                  <span className="text-[10px] text-gray-400">set pixel bounds, curve scale, and depth scale</span>
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-gray-800">Graph {graphLabels[idx]}</span>
+                    <span className="text-[10px] text-gray-400">set pixel bounds, curve scale, and depth scale</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditedBounds(prev => prev.map((item, i) => i === idx ? { ...item, scaleType: item.scaleType === 'log' ? 'linear' : 'log' } : item))}
+                      className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${
+                        b.scaleType === 'log'
+                          ? "bg-purple-600 hover:bg-purple-700"
+                          : "bg-gray-400 hover:bg-gray-500"
+                      }`}
+                    >
+                      {b.scaleType === 'log' ? "Log" : "Linear"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleWrap(idx)}
+                      className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${
+                        b.wrapGroup > 0
+                          ? "bg-green-500 hover:bg-green-600"
+                          : "bg-red-500 hover:bg-red-600"
+                      }`}
+                    >
+                      {b.wrapGroup > 0 ? `Wrap${b.wrapGroup}` : "Wrap"}
+                    </button>
+                  </div>
                 </div>
                 <div className="grid grid-cols-8 gap-2">
                   {[
@@ -91,23 +152,45 @@ function ExportModal({ open, onClose, boundaries, onExport, graphLabels, autoDep
 }
 
 function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
+  const [isMinimized, setIsMinimized] = useState(false);
+
+  useEffect(() => {
+    if (!open) setIsMinimized(false);
+  }, [open]);
+
   const initial = useMemo(() => {
     return {
       graphs: graphLabels.map((_, i) => ({
         curveName: defaults?.curveNames?.[i] || "",
         xLeft: defaults?.graphs?.[i]?.minValue ?? "",
         xRight: defaults?.graphs?.[i]?.maxValue ?? "",
+        wrapGroup: defaults?.graphs?.[i]?.wrapGroup || 0,
+        scaleType: defaults?.graphs?.[i]?.scaleType || 'linear',
       })),
       depth_top: defaults?.depth?.top ?? "",
       depth_bottom: defaults?.depth?.bottom ?? "",
     };
   }, [defaults, graphLabels]);
-  
+
   const [formData, setFormData] = useState(initial);
+  const prevOpen = useRef(open);
 
   useEffect(() => {
-    if (open) setFormData(initial);
-  }, [open, initial]);
+    if (open && !prevOpen.current) {
+      setFormData(initial);
+    } else if (open && prevOpen.current) {
+      setFormData(prev => {
+        if (prev.graphs.length === initial.graphs.length) {
+          return prev;
+        }
+        return {
+          ...prev,
+          graphs: graphLabels.map((_, i) => prev.graphs[i] || initial.graphs[i])
+        };
+      });
+    }
+    prevOpen.current = open;
+  }, [open, initial, graphLabels]);
 
   if (!open) return null;
 
@@ -143,7 +226,11 @@ function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
         alert(`Graph ${graphLabels[i] || i + 1} left and right X values cannot be equal.`);
         return;
       }
-      parsedGraphs.push({ curveName: name, xLeft, xRight });
+      if (g.scaleType === 'log' && (xLeft <= 0 || xRight <= 0)) {
+        alert(`Graph ${graphLabels[i] || i + 1} is set to Log scale — edge values must both be > 0.`);
+        return;
+      }
+      parsedGraphs.push({ curveName: name, xLeft, xRight, wrapGroup: g.wrapGroup || 0, scaleType: g.scaleType || 'linear' });
     }
 
     const names = parsedGraphs.map(g => g.curveName.toUpperCase());
@@ -173,18 +260,103 @@ function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-sm">
-      <div className="w-[640px] max-w-[92vw] rounded-2xl bg-white shadow-2xl">
-        <div className="border-b border-gray-100 px-6 py-4">
-          <h2 className="text-base font-bold text-gray-900">Enter Axis Scale Values</h2>
-          <p className="mt-1 text-xs font-medium text-gray-500">
-            Enter the physical values printed at each graph edge. Export will use 0.50 ft depth rows.
-          </p>
+    <div className={`fixed inset-0 z-50 flex items-center justify-center transition-all duration-300 ${isMinimized ? 'pointer-events-none' : 'bg-black/45 backdrop-blur-sm'}`}>
+      {isMinimized && (
+        <div className="fixed bottom-6 right-6 pointer-events-auto">
+          <button 
+            onClick={() => setIsMinimized(false)}
+            className="flex items-center gap-2 px-5 py-3 bg-blue-600 text-white font-bold rounded-full shadow-2xl hover:bg-blue-700 hover:scale-105 transition-all ring-4 ring-blue-600/30"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+            <span>Scale Entry</span>
+          </button>
+        </div>
+      )}
+      
+      <div className={`w-[640px] max-w-[92vw] rounded-2xl bg-white shadow-2xl transition-all duration-300 pointer-events-auto ${isMinimized ? 'scale-90 opacity-0 pointer-events-none absolute' : 'scale-100 opacity-100 relative'}`}>
+        <div className="border-b border-gray-100 px-6 py-4 flex items-start justify-between">
+          <div>
+            <h2 className="text-base font-bold text-gray-900">Enter Axis Scale Values</h2>
+            <p className="mt-1 text-xs font-medium text-gray-500">
+              Enter the physical values printed at each graph edge. Export will use 0.50 ft depth rows.
+            </p>
+          </div>
+          <button 
+            onClick={() => setIsMinimized(true)}
+            className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+            title="Minimize"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>
+          </button>
         </div>
         <div className="space-y-4 px-6 py-5 max-h-[60vh] overflow-y-auto">
           {formData.graphs.map((g, i) => (
             <div key={i} className={`rounded-xl border p-3 ${i % 2 === 0 ? 'border-red-100 bg-red-50/60' : 'border-green-100 bg-green-50/60'}`}>
-              <h3 className={`mb-2 text-xs font-bold ${i % 2 === 0 ? 'text-red-700' : 'text-green-700'}`}>Graph {graphLabels[i] || i + 1}</h3>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className={`text-xs font-bold ${i % 2 === 0 ? 'text-red-700' : 'text-green-700'}`}>Graph {graphLabels[i] || i + 1}</h3>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormData(prev => {
+                        const newGraphs = [...prev.graphs];
+                        newGraphs[i] = { ...newGraphs[i], scaleType: newGraphs[i].scaleType === 'log' ? 'linear' : 'log' };
+                        return { ...prev, graphs: newGraphs };
+                      });
+                    }}
+                    className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${
+                      g.scaleType === 'log'
+                        ? "bg-purple-600 hover:bg-purple-700"
+                        : "bg-gray-400 hover:bg-gray-500"
+                    }`}
+                  >
+                    {g.scaleType === 'log' ? "Log" : "Linear"}
+                  </button>
+                  <button
+                    type="button"
+                  onClick={() => {
+                    setFormData(prev => {
+                      const newGraphs = [...prev.graphs];
+                      const currentVal = newGraphs[i].wrapGroup || 0;
+                      if (currentVal > 0) {
+                        newGraphs[i] = { ...newGraphs[i], wrapGroup: 0 };
+                      } else {
+                        const counts = {};
+                        let maxGroup = 0;
+                        newGraphs.forEach((g, idx) => {
+                          if (idx !== i && g.wrapGroup > 0) {
+                            counts[g.wrapGroup] = (counts[g.wrapGroup] || 0) + 1;
+                            if (g.wrapGroup > maxGroup) maxGroup = g.wrapGroup;
+                          }
+                        });
+                        
+                        let targetGroup = null;
+                        for (let g = 1; g <= maxGroup; g++) {
+                          if (counts[g] === 1) {
+                            targetGroup = g;
+                            break;
+                          }
+                        }
+                        
+                        if (targetGroup === null) {
+                          targetGroup = maxGroup + 1;
+                        }
+                        
+                        newGraphs[i] = { ...newGraphs[i], wrapGroup: targetGroup };
+                      }
+                      return { ...prev, graphs: newGraphs };
+                    });
+                  }}
+                  className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${
+                    g.wrapGroup > 0
+                      ? "bg-green-500 hover:bg-green-600"
+                      : "bg-red-500 hover:bg-red-600"
+                  }`}
+                >
+                  {g.wrapGroup > 0 ? `Wrap${g.wrapGroup}` : "Wrap"}
+                  </button>
+                </div>
+              </div>
               <label className="mb-3 block text-[10px] font-semibold uppercase tracking-wide text-gray-500">
                 Curve name
                 <input type="text" maxLength={20} value={g.curveName} onChange={handleGraphChange(i, "curveName")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. SP, GR, CALI" />
@@ -193,11 +365,11 @@ function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
               <div className="grid grid-cols-2 gap-3">
                 <label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
                   Left edge value
-                  <input type="number" value={g.xLeft} onChange={handleGraphChange(i, "xLeft")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. 0" />
+                  <input type="number" value={g.xLeft} onChange={handleGraphChange(i, "xLeft")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder={g.scaleType === 'log' ? "e.g. 0.2" : "e.g. 0"} />
                 </label>
                 <label className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
                   Right edge value
-                  <input type="number" value={g.xRight} onChange={handleGraphChange(i, "xRight")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder="e.g. 100" />
+                  <input type="number" value={g.xRight} onChange={handleGraphChange(i, "xRight")} className="mt-1 w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-800" placeholder={g.scaleType === 'log' ? "e.g. 2000" : "e.g. 100"} />
                 </label>
               </div>
             </div>
@@ -393,6 +565,35 @@ const valueToPixel = (value, valueMin, valueMax, pxMin, pxMax) => {
   return pxMin + ratio * (pxMax - pxMin);
 };
 
+const pixelToValueLog = (px, pxMin, pxMax, vMin, vMax) => {
+  if (pxMax === pxMin) return vMin;
+  if (!(vMin > 0) || !(vMax > 0)) return pixelToValue(px, pxMin, pxMax, vMin, vMax);
+  const ratio = (px - pxMin) / (pxMax - pxMin);
+  return Math.pow(10, Math.log10(vMin) + ratio * (Math.log10(vMax) - Math.log10(vMin)));
+};
+
+const valueToPixelLog = (value, vMin, vMax, pxMin, pxMax) => {
+  if (!(vMin > 0) || !(vMax > 0) || !(value > 0)) return valueToPixel(value, vMin, vMax, pxMin, pxMax);
+  const ratio = (Math.log10(value) - Math.log10(vMin)) / (Math.log10(vMax) - Math.log10(vMin));
+  return pxMin + ratio * (pxMax - pxMin);
+};
+
+const scaledPixelToValue = (px, pxMin, pxMax, vMin, vMax, scaleType) =>
+  scaleType === 'log' ? pixelToValueLog(px, pxMin, pxMax, vMin, vMax)
+                      : pixelToValue(px, pxMin, pxMax, vMin, vMax);
+
+const scaledValueToPixel = (value, vMin, vMax, pxMin, pxMax, scaleType) =>
+  scaleType === 'log' ? valueToPixelLog(value, vMin, vMax, pxMin, pxMax)
+                      : valueToPixel(value, vMin, vMax, pxMin, pxMax);
+
+const applyWrapOffset = (baseValue, wrapLevel, vLeft, vRight, scaleType) => {
+  if (!wrapLevel) return baseValue;
+  if (scaleType === 'log') {
+    return (vLeft > 0 && vRight > 0) ? baseValue * Math.pow(vRight / vLeft, wrapLevel) : baseValue;
+  }
+  return baseValue + wrapLevel * (vRight - vLeft);
+};
+
 const mapPointToGraphValues = (point, boundary, scale) => {
   if (!point || !boundary) return null;
   const width = boundary.right - boundary.left;
@@ -407,7 +608,7 @@ const mapPointToGraphValues = (point, boundary, scale) => {
   const yFraction = clamp((point.y - boundary.top) / height, 0, 1);
 
   return {
-    value: pixelToValue(point.x, boundary.left, boundary.right, minValue, maxValue),
+    value: scaledPixelToValue(point.x, boundary.left, boundary.right, minValue, maxValue, scale?.scaleType),
     depth: pixelToValue(point.y, boundary.top, boundary.bottom, topDepth, bottomDepth),
     xFraction,
     yFraction,
@@ -520,65 +721,75 @@ const curvePointToValues = (point, croppedRegion, xScale, depthScaleObj) => {
   const localY = Number(sourcePoint.y) - Number(croppedRegion.bounds.top);
   if (!Number.isFinite(localX) || !Number.isFinite(localY)) return null;
   if (localX < 0 || localX > croppedRegion.width || localY < 0 || localY > croppedRegion.height) return null;
-  
-  const baseValue = pixelToValue(localX, 0, croppedRegion.width, xScale.xLeft, xScale.xRight);
+
+  const baseValue = scaledPixelToValue(localX, 0, croppedRegion.width, xScale.xLeft, xScale.xRight, xScale.scaleType);
   const wrapLevel = Number(sourcePoint.wrapLevel || 0);
-  const wrapOffset = wrapLevel * (Number(xScale.xRight) - Number(xScale.xLeft));
-  
+  const value = applyWrapOffset(baseValue, wrapLevel, Number(xScale.xLeft), Number(xScale.xRight), xScale.scaleType);
+
   return {
     depth: pixelToValue(localY, 0, croppedRegion.height, depthScaleObj.top, depthScaleObj.bottom),
-    value: baseValue + wrapOffset,
+    value,
   };
 };
 
-const resampleAt0_50 = (rawPoints, croppedRegion, xScale, depthScaleObj, wrapLevelsArr) => {
-  const nullValue = -9999.25;
-  const step = 0.5;
-  // Filter null break-markers and annotate each point with its wrapLevel
-  const realPoints = (rawPoints || []).reduce((acc, pt, i) => {
-    if (!pt) return acc; // skip break markers
-    // Attach wrapLevel from parallel array (if available), else fall back to point[2]
-    const wl = wrapLevelsArr ? (wrapLevelsArr[i] ?? 0) : (Array.isArray(pt) ? (Number(pt[2]) || 0) : 0);
-    acc.push(Array.isArray(pt) ? [pt[0], pt[1], wl] : { ...pt, wrapLevel: wl });
-    return acc;
-  }, []);
-  const physicalPoints = realPoints
-    .map(point => curvePointToValues(point, croppedRegion, xScale, depthScaleObj))
-    .filter(Boolean)
-    .sort((a, b) => a.depth - b.depth);
+const resampleCurveGeneral = (rawPoints, croppedRegion, xScaleObj, depthScaleObj, wrapLevelsArr, step) => {
+  const pieces = [];
+  let currentLap = 0;
+  let currentPoints = [];
 
-  if (!physicalPoints.length) return [];
-
-  const result = [];
-  const totalSteps = Math.round((depthScaleObj.bottom - depthScaleObj.top) / step);
-  for (let i = 0; i <= totalSteps; i += 1) {
-    const targetDepth = Number((depthScaleObj.top + i * step).toFixed(4));
-    let before = null;
-    let after = null;
-    for (const point of physicalPoints) {
-      if (point.depth <= targetDepth) before = point;
-      if (point.depth >= targetDepth) {
-        after = point;
-        break;
+  for (let i = 0; i < (rawPoints || []).length; i++) {
+    const pt = rawPoints[i];
+    if (pt === null) {
+      if (currentPoints.length > 0) {
+        pieces.push({ lap: currentLap, points: currentPoints });
+        currentPoints = [];
       }
+    } else {
+      const wl = wrapLevelsArr ? (wrapLevelsArr[i] ?? 0) : (Array.isArray(pt) ? (Number(pt[2]) || 0) : 0);
+      if (currentPoints.length > 0 && currentLap !== wl) {
+        pieces.push({ lap: currentLap, points: currentPoints });
+        currentPoints = [];
+      }
+      currentLap = wl;
+      
+      const sourcePoint = Array.isArray(pt) ? { x: Number(pt[0]), y: Number(pt[1]) } : pt;
+      currentPoints.push([Number(sourcePoint.x), Number(sourcePoint.y)]);
     }
-    let value = nullValue;
-    if (before && after && Math.abs(before.depth - after.depth) < 0.0001) {
-      value = before.value;
-    } else if (before && after) {
-      const ratio = (targetDepth - before.depth) / (after.depth - before.depth);
-      value = before.value + ratio * (after.value - before.value);
-    } else if (before) {
-      value = before.value;
-    } else if (after) {
-      value = after.value;
-    }
-    result.push({ depth: targetDepth, value: Number(value.toFixed(5)) });
   }
-  return result;
+  if (currentPoints.length > 0) {
+    pieces.push({ lap: currentLap, points: currentPoints });
+  }
+
+  const scale = { 
+    pxLeft: Number(croppedRegion.bounds.left), 
+    pxRight: Number(croppedRegion.bounds.right), 
+    valueLeft: Number(xScaleObj.minVal), 
+    valueRight: Number(xScaleObj.maxVal),
+    type: xScaleObj.scaleType
+  };
+  const depth = { 
+    pxTop: Number(croppedRegion.bounds.top), 
+    pxBottom: Number(croppedRegion.bounds.bottom), 
+    depthTop: Number(depthScaleObj.top), 
+    depthBottom: Number(depthScaleObj.bottom), 
+    step: Number(step) 
+  };
+
+  return resampleWrappedCurve(pieces, scale, depth);
 };
 
-const resampleCurveToDepth = (curvePoints, bounds, xScale, depthScale) => {
+const resampleAt0_50 = (rawPoints, croppedRegion, xScale, depthScaleObj, wrapLevelsArr) => {
+  return resampleCurveGeneral(
+    rawPoints,
+    croppedRegion,
+    { minVal: Number(xScale.xLeft), maxVal: Number(xScale.xRight), scaleType: xScale.scaleType },
+    depthScaleObj,
+    wrapLevelsArr,
+    0.5
+  );
+};
+
+const resampleCurveToDepth = (curvePoints, bounds, xScale, depthScale, wrapLevelsArr) => {
   const pxTop = Number(bounds.top);
   const pxBottom = Number(bounds.bottom);
   const pxLeft = Number(bounds.left);
@@ -589,42 +800,23 @@ const resampleCurveToDepth = (curvePoints, bounds, xScale, depthScale) => {
   if (![pxTop, pxBottom, pxLeft, pxRight, depthTop, depthBottom, step].every(Number.isFinite) || step <= 0) {
     return [];
   }
-
-  const sorted = (curvePoints || [])
-    .map(pt => Array.isArray(pt) ? { x: Number(pt[0]), y: Number(pt[1]) } : { x: Number(pt.x), y: Number(pt.y) })
-    .filter(pt =>
-      Number.isFinite(pt.x) && Number.isFinite(pt.y) &&
-      pt.x >= pxLeft && pt.x <= pxRight &&
-      pt.y >= pxTop && pt.y <= pxBottom
-    )
-    .sort((a, b) => a.y - b.y);
-
-  const results = [];
-  const tolerance = Math.max(2, Math.abs(pxBottom - pxTop) * 0.02);
-  for (let depth = depthTop; depth <= depthBottom + step * 0.001; depth = Number((depth + step).toFixed(10))) {
-    const targetPxY = valueToPixel(depth, depthTop, depthBottom, pxTop, pxBottom);
-    let closest = null;
-    let minDist = Infinity;
-    for (const pt of sorted) {
-      const dist = Math.abs(pt.y - targetPxY);
-      if (dist < minDist) {
-        minDist = dist;
-        closest = pt;
-      }
-    }
-    const value = closest && minDist <= tolerance
-      ? pixelToValue(closest.x, pxLeft, pxRight, Number(xScale.min), Number(xScale.max))
-      : -9999.25;
-    results.push({
-      depth: Number(depth.toFixed(4)),
-      value: Number(value.toFixed(4)),
-    });
-  }
-  return results;
+  const croppedRegion = {
+    bounds,
+    width: pxRight - pxLeft,
+    height: pxBottom - pxTop
+  };
+  return resampleCurveGeneral(
+    curvePoints,
+    croppedRegion,
+    { minVal: Number(xScale.min), maxVal: Number(xScale.max), scaleType: xScale.scaleType },
+    { top: depthTop, bottom: depthBottom },
+    wrapLevelsArr,
+    step
+  );
 };
 
 const buildLASString = ({ wellName, field, date, depthTop, depthBottom, depthStep, curves, depthUnit = "FT" }) => {
-  const nullValue = -9999.25;
+  const nullValue = -999.25;
   const curveList = curves || [];
   const depthValues = curveList[0]?.data?.map(pt => pt.depth) || [];
   const versionSection = [
@@ -682,14 +874,14 @@ const buildLASString = ({ wellName, field, date, depthTop, depthBottom, depthSte
 
 const drawDebugOverlay = (ctx, curvePoints, croppedRegion, xScale, depthScale, zoomValue) => {
   const sampled = resampleAt0_50(curvePoints, croppedRegion, xScale, depthScale)
-    .filter(pt => pt.value !== -9999.25);
+    .filter(pt => pt.value !== -999.25);
   if (!sampled.length) return;
   ctx.save();
   ctx.strokeStyle = "rgba(255, 145, 0, 0.9)";
   ctx.lineWidth = 2;
   ctx.beginPath();
   sampled.forEach((pt, idx) => {
-    const px = (croppedRegion.bounds.left + valueToPixel(pt.value, xScale.xLeft, xScale.xRight, 0, croppedRegion.width)) * zoomValue;
+    const px = (croppedRegion.bounds.left + scaledValueToPixel(pt.value, xScale.xLeft, xScale.xRight, 0, croppedRegion.width, xScale.scaleType)) * zoomValue;
     const py = (croppedRegion.bounds.top + valueToPixel(pt.depth, depthScale.top, depthScale.bottom, 0, croppedRegion.height)) * zoomValue;
     if (idx === 0) ctx.moveTo(px, py);
     else ctx.lineTo(px, py);
@@ -1373,6 +1565,7 @@ function WorkflowInstructionsModal({ onClose }) {
 
 /* ─── Main Component ─────────────────────────────────────────────────────────── */
 export default function GraphTrackerV2() {
+  const navigate = useNavigate();
   const [showExport, setShowExport] = useState(false);
   const [showHeaderOcrModal, setShowHeaderOcrModal] = useState(false);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
@@ -1621,27 +1814,16 @@ export default function GraphTrackerV2() {
         ctx.strokeStyle = col;
         ctx.lineWidth = 2;
 
-        // Break-aware rendering: lift pen at null markers AND at big horizontal jumps (wrap edges)
+        // Break-aware rendering: lift pen at explicit null markers only
         if (line.length > 1) {
-          // Compute track width for implicit wrap-jump detection
-          const realPts = line.filter(Boolean);
-          const curveBoundsX = realPts.length ? { min: Math.min(...realPts.map(p => p[0])), max: Math.max(...realPts.map(p => p[0])) } : { min: 0, max: imageDimensions.width };
-          const TRACK_W = curveBoundsX.max - curveBoundsX.min || imageDimensions.width;
-          const WRAP_JUMP = 0.4 * TRACK_W;
-
           ctx.beginPath();
-          let penDown = false, prev = null;
+          let penDown = false;
           for (let i = 0; i < line.length; i++) {
             const pt = line[i];
-            if (!pt) { penDown = false; prev = null; continue; } // explicit break marker
+            if (!pt) { penDown = false; continue; } // explicit break marker
             const X = pt[0] * zoom, Y = pt[1] * zoom;
-            if (penDown && prev) {
-              const dx = Math.abs(pt[0] - prev[0]), dy = Math.abs(pt[1] - prev[1]);
-              if (dx > WRAP_JUMP && dx > dy * 2) { penDown = false; } // implicit wrap-jump -> lift pen
-            }
             if (!penDown) { ctx.moveTo(X, Y); penDown = true; }
             else { ctx.lineTo(X, Y); }
-            prev = pt;
           }
           ctx.stroke();
         }
@@ -1766,16 +1948,37 @@ export default function GraphTrackerV2() {
   }, [historyIdx, history, handleUndo, handleRedo]);
 
   /* ══════════════════════════════════════════════ FILE ══════════════════════════════════════════════ */
-  const handleFileUpload = (file) => {
+  const handleFileUpload = async (file) => {
     if (!file) return;
     const ext = file.name.split(".").pop().toLowerCase();
-    if (!["tif", "tiff"].includes(ext)) { toast.error("Please upload a .tif or .tiff file."); return; }
+    if (!["tif", "tiff", "png", "jpg", "jpeg"].includes(ext)) { toast.error("Please upload a supported image file (.tif, .png, .jpg)."); return; }
+    
     setUploadedFile(file);
-    const url = URL.createObjectURL(file);
+    toast.loading("Processing image for display...", { id: "upload" });
+
+    let displayUrl = URL.createObjectURL(file);
+    
+    if (ext === "tif" || ext === "tiff") {
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const baseUrl = API_URL.replace("/segment-and-graph", "");
+        const res = await fetch(`${baseUrl}/convert-image`, { method: "POST", body: form });
+        if (res.ok) {
+          const blob = await res.blob();
+          displayUrl = URL.createObjectURL(blob);
+        } else {
+          console.warn("Failed to convert TIFF via backend.");
+        }
+      } catch (err) {
+        console.warn("Error converting TIFF", err);
+      }
+    }
+
     const img = new Image();
     img.onload = () => {
       setImageDimensions({ width: img.width, height: img.height });
-      setImageUrl(url);
+      setImageUrl(displayUrl);
       setHeaderImageUrl(null);
       setLayoutInfo(null);
       setLasHeaders(null);
@@ -1809,9 +2012,12 @@ export default function GraphTrackerV2() {
       setHoveredPlot(null);
       setSelectedPlot(null);
       setTrackPoints([]);
+      toast.success("File uploaded.", { id: "upload" });
     };
-    img.src = url;
-    toast.success("File uploaded.");
+    img.onerror = () => {
+      toast.error("Failed to render image.", { id: "upload" });
+    };
+    img.src = displayUrl; 
   };
 
   /* ══════════════════════════════════════════════ AI DETECTION ══════════════════════════════════════ */
@@ -2243,6 +2449,8 @@ export default function GraphTrackerV2() {
     const nextScales = parsed.graphs.map(g => ({
       xLeft: g.xLeft,
       xRight: g.xRight,
+      wrapGroup: g.wrapGroup || 0,
+      scaleType: g.scaleType || 'linear',
     }));
     const nextCurveNames = parsed.graphs.map(g => g.curveName);
     const nextDepthScale = { top: parsed.depth_top, bottom: parsed.depth_bottom, step: 0.5 };
@@ -2254,6 +2462,8 @@ export default function GraphTrackerV2() {
       maxValue: nextScales[idx]?.xRight ?? 100,
       topDepth: nextDepthScale.top,
       bottomDepth: nextDepthScale.bottom,
+      wrapGroup: nextScales[idx]?.wrapGroup || 0,
+      scaleType: nextScales[idx]?.scaleType || 'linear',
     })));
     setShowScaleModal(false);
     toast.success("Scale and curve names applied. LAS export is ready.");
@@ -2306,13 +2516,17 @@ export default function GraphTrackerV2() {
         errors.push(`Scale values are invalid for Graph ${gLabel(idx)}.`);
         return null;
       }
+      if (scale.scaleType === 'log' && (scale.xLeft <= 0 || scale.xRight <= 0)) {
+        errors.push(`Graph ${gLabel(idx)} is Log scale but contains invalid non-positive edge values.`);
+        return null;
+      }
       // Pass the parallel wrapLevels array so resampleAt0_50 can apply wrap offsets
       const data = resampleAt0_50(line, croppedRegion, scale, depthScale, curveWrapLevels[idx] || null);
       if (!data.length) {
         errors.push(`No valid curve points found inside Graph ${gLabel(idx)} boundary.`);
         return null;
       }
-      const nonNullCount = data.filter(point => point.value !== -9999.25).length;
+      const nonNullCount = data.filter(point => point.value !== -999.25).length;
       if (!nonNullCount) {
         errors.push(`Graph ${gLabel(idx)} sampled values are all null; check the crop boundary.`);
         return null;
@@ -2322,6 +2536,8 @@ export default function GraphTrackerV2() {
         unit: "",
         description: `${curveNames[idx] || `Graph ${gLabel(idx)}`} - Graph ${gLabel(idx)}`,
         data,
+        wrapGroup: scale?.wrapGroup || 0,
+        scaleType: scale?.scaleType || 'linear'
       };
     }).filter(Boolean);
 
@@ -2333,6 +2549,54 @@ export default function GraphTrackerV2() {
       return;
     }
 
+    const finalSampledCurves = [];
+    const groups = {};
+    sampledCurves.forEach(c => {
+      if (c.wrapGroup > 0) {
+        groups[c.wrapGroup] = groups[c.wrapGroup] || [];
+        groups[c.wrapGroup].push(c);
+      } else {
+        finalSampledCurves.push(c);
+      }
+    });
+
+    Object.entries(groups).forEach(([groupId, curves]) => {
+      if (curves.length >= 2) {
+        const first = curves[0];
+        const mergedData = [];
+        const depthValuesMap = {};
+
+        curves.forEach(curve => {
+          curve.data.forEach(pt => {
+            if (!depthValuesMap[pt.depth]) {
+              depthValuesMap[pt.depth] = [];
+            }
+            depthValuesMap[pt.depth].push(pt.value);
+          });
+        });
+
+        const sortedDepths = Object.keys(depthValuesMap).map(Number).sort((a, b) => a - b);
+        sortedDepths.forEach(d => {
+          const vals = depthValuesMap[d];
+          const validVals = vals.filter(v => v !== -999.25);
+          let mergedVal = -999.25;
+          if (validVals.length > 0) {
+            mergedVal = Math.max(...validVals);
+          }
+          mergedData.push({ depth: d, value: mergedVal });
+        });
+
+        finalSampledCurves.push({
+          name: first.name,
+          unit: first.unit,
+          description: `Wrap${groupId} (Merged)`,
+          data: mergedData
+        });
+      } else {
+        curves.forEach(c => finalSampledCurves.push(c));
+      }
+    });
+
     const headerText = completeHeaderText || formatLasHeadersAsText(lasHeaders);
     const header = buildHeaderDownloadData({ lasHeaders, headerText, uploadedFile, autoDepthRange });
     const lasText = buildLASString({
@@ -2343,7 +2607,7 @@ export default function GraphTrackerV2() {
       depthBottom: depthScale.bottom,
       depthStep: 0.5,
       depthUnit: "FT",
-      curves: sampledCurves,
+      curves: finalSampledCurves,
     });
     const baseName = (header.well || uploadedFile?.name || "export").replace(/\.[^/.]+$/, "").replace(/[\s/\\:*?"<>|]/g, "_");
     triggerSaveAs(new Blob([lasText], { type: "text/plain;charset=utf-8" }), `${baseName}.las`);
@@ -2406,14 +2670,39 @@ export default function GraphTrackerV2() {
         errors.push(`Graph ${gLabel(idx)} has no curve points.`);
         return;
       }
-      const boundary = normalizedBounds[idx] || graphBoundaryView[idx] || lineBounds(line, imageDimensions.width, imageDimensions.height);
+      const boundary = normalizedBounds[idx] || graphBoundaryView[idx] || lineBounds(line.filter(Boolean), imageDimensions.width, imageDimensions.height);
       exportBounds[idx] = boundary;
-      const filteredLine = line.filter(([x, y]) => x >= boundary.left && x <= boundary.right && y >= boundary.top && y <= boundary.bottom);
+
+      // Preserve null break-markers and the parallel wrapLevels array.
+      // Filter real points by boundary but keep nulls in place so fragment
+      // detection works in resampleCurveToDepth.
+      const wrapLevels = curveWrapLevels[idx] || null;
+      const filteredLine = [];
+      const filteredWrapLevels = wrapLevels ? [] : null;
+      for (let j = 0; j < line.length; j++) {
+        const pt = line[j];
+        if (pt === null) {
+          // Only insert a break if we have at least one real point before it
+          if (filteredLine.length > 0 && filteredLine[filteredLine.length - 1] !== null) {
+            filteredLine.push(null);
+            if (filteredWrapLevels) filteredWrapLevels.push(null);
+          }
+        } else {
+          const [x, y] = pt;
+          if (x >= boundary.left && x <= boundary.right && y >= boundary.top && y <= boundary.bottom) {
+            filteredLine.push(pt);
+            if (filteredWrapLevels) filteredWrapLevels.push(wrapLevels[j] ?? 0);
+          }
+        }
+      }
+      // Remove any trailing null
+      while (filteredLine.length > 0 && filteredLine[filteredLine.length - 1] === null) filteredLine.pop();
+
       if (boundary.right <= boundary.left || boundary.bottom <= boundary.top) {
         errors.push(`Graph ${gLabel(idx)} boundary is invalid.`);
         return;
       }
-      if (!filteredLine.length) {
+      if (!filteredLine.filter(Boolean).length) {
         errors.push(`Graph ${gLabel(idx)} has no points inside its boundary.`);
         return;
       }
@@ -2430,6 +2719,10 @@ export default function GraphTrackerV2() {
         errors.push(`Graph ${gLabel(idx)} X-axis min and max cannot be equal.`);
         return;
       }
+      if (row.scaleType === 'log' && (minValue <= 0 || maxValue <= 0)) {
+        errors.push(`Graph ${gLabel(idx)} is Log scale; min and max must be > 0.`);
+        return;
+      }
       if (!Number.isFinite(topDepth) || !Number.isFinite(bottomDepth) || topDepth >= bottomDepth) {
         errors.push(`Graph ${gLabel(idx)} depth top must be less than depth bottom.`);
         return;
@@ -2438,23 +2731,127 @@ export default function GraphTrackerV2() {
         errors.push(`Graph ${gLabel(idx)} depth step must be a positive number.`);
         return;
       }
+
       const curveName = String(row.curveName || gLabel(idx)).trim() || gLabel(idx);
-      const data = resampleCurveToDepth(
-        filteredLine,
-        boundary,
-        { min: minValue, max: maxValue },
-        { top: topDepth, bottom: bottomDepth, step: depthStep }
-      );
-      if (!data.length) {
-        errors.push(`Graph ${gLabel(idx)} could not be resampled.`);
-        return;
-      }
+      
       sampledCurves.push({
-        name: curveName,
+        baseName: curveName.split('_')[0],
+        userLap: isNaN(parseInt(curveName.includes('_') ? curveName.split('_').pop() : "0", 10)) ? 0 : parseInt(curveName.includes('_') ? curveName.split('_').pop() : "0", 10),
+        filteredLine,
+        filteredWrapLevels,
         unit: row.curveUnit || "NONE",
         description: `Graph ${gLabel(idx)} curve`,
-        data,
+        scale: { pxLeft: boundary.left, pxRight: boundary.right, valueLeft: minValue, valueRight: maxValue, type: row.scaleType || 'linear' },
+        depth: { pxTop: boundary.top, pxBottom: boundary.bottom, depthTop, bottomDepth, step: depthStep },
+        wrapGroup: row.wrapGroup || 0
       });
+    });
+
+    const baseCurvePiecesMap = {};
+    const baseCurvePropsMap = {};
+
+    sampledCurves.forEach((curve) => {
+      const { baseName, userLap, filteredLine, filteredWrapLevels } = curve;
+      
+      let currentLap = filteredWrapLevels ? filteredWrapLevels[0] ?? userLap : userLap;
+      let currentPoints = [];
+      for (let i = 0; i < filteredLine.length; i++) {
+        if (filteredLine[i] === null) {
+          if (currentPoints.length > 0) {
+             if (!baseCurvePiecesMap[baseName]) baseCurvePiecesMap[baseName] = [];
+             baseCurvePiecesMap[baseName].push({ lap: currentLap, points: currentPoints });
+             currentPoints = [];
+          }
+        } else {
+          const lap = filteredWrapLevels ? filteredWrapLevels[i] : userLap;
+          if (currentPoints.length > 0 && currentLap !== lap) {
+             if (!baseCurvePiecesMap[baseName]) baseCurvePiecesMap[baseName] = [];
+             baseCurvePiecesMap[baseName].push({ lap: currentLap, points: currentPoints });
+             currentPoints = [];
+          }
+          currentLap = lap;
+          currentPoints.push(filteredLine[i]);
+        }
+      }
+      if (currentPoints.length > 0) {
+        if (!baseCurvePiecesMap[baseName]) baseCurvePiecesMap[baseName] = [];
+        baseCurvePiecesMap[baseName].push({ lap: currentLap, points: currentPoints });
+      }
+
+      if (!baseCurvePropsMap[baseName]) {
+        baseCurvePropsMap[baseName] = {
+           name: baseName,
+           unit: curve.unit,
+           description: curve.description,
+           scale: curve.scale,
+           depth: { pxTop: curve.depth.pxTop, pxBottom: curve.depth.pxBottom, depthTop: curve.depth.depthTop, depthBottom: curve.depth.bottomDepth, step: curve.depth.step },
+           wrapGroup: curve.wrapGroup || 0
+        };
+      }
+    });
+
+    const resampledCurves = [];
+    Object.keys(baseCurvePiecesMap).forEach(baseName => {
+      const pieces = baseCurvePiecesMap[baseName];
+      const props = baseCurvePropsMap[baseName];
+      const data = resampleWrappedCurve(pieces, props.scale, props.depth);
+      if (data.length) {
+         resampledCurves.push({
+           name: props.name,
+           unit: props.unit,
+           description: props.description,
+           data,
+           wrapGroup: props.wrapGroup || 0
+         });
+      }
+    });
+
+    const finalSampledCurves = [];
+    const groups = {};
+    resampledCurves.forEach(c => {
+      if (c.wrapGroup > 0) {
+        groups[c.wrapGroup] = groups[c.wrapGroup] || [];
+        groups[c.wrapGroup].push(c);
+      } else {
+        finalSampledCurves.push(c);
+      }
+    });
+
+    Object.entries(groups).forEach(([groupId, curves]) => {
+      if (curves.length >= 2) {
+        const first = curves[0];
+        const mergedData = [];
+        const depthValuesMap = {};
+
+        curves.forEach(curve => {
+          curve.data.forEach(pt => {
+            if (!depthValuesMap[pt.depth]) {
+              depthValuesMap[pt.depth] = [];
+            }
+            depthValuesMap[pt.depth].push(pt.value);
+          });
+        });
+
+        const sortedDepths = Object.keys(depthValuesMap).map(Number).sort((a, b) => a - b);
+        sortedDepths.forEach(d => {
+          const vals = depthValuesMap[d];
+          const validVals = vals.filter(v => v !== -999.25);
+          let mergedVal = -999.25;
+          if (validVals.length > 0) {
+            mergedVal = Math.max(...validVals);
+          }
+          mergedData.push({ depth: d, value: mergedVal });
+        });
+
+        finalSampledCurves.push({
+          name: first.name,
+          unit: first.unit,
+          description: `Wrap${groupId} (Merged)`,
+          data: mergedData
+        });
+      } else {
+        curves.forEach(c => finalSampledCurves.push(c));
+      }
     });
 
     if (errors.length) {
@@ -2462,7 +2859,7 @@ export default function GraphTrackerV2() {
       return;
     }
 
-    if (!sampledCurves.length) {
+    if (!finalSampledCurves.length) {
       toast.error("No sampled curve data available for LAS export.");
       return;
     }
@@ -2485,7 +2882,7 @@ export default function GraphTrackerV2() {
         depthBottom,
         depthStep,
         depthUnit: firstRow.depthUnit || "FT",
-        curves: sampledCurves,
+        curves: finalSampledCurves,
       });
       const baseName = (uploadedFile?.name || "graph").replace(/\.[^/.]+$/, "");
       triggerSaveAs(new Blob([lasText], { type: "text/plain;charset=utf-8" }), `${baseName}_all_curves.las`);
@@ -2590,11 +2987,23 @@ export default function GraphTrackerV2() {
           </button>
           {/* User menu placeholder */}
           <div className="relative ml-2">
-            <div
-              title="Digitizer Active"
-              className="w-7 h-7 bg-blue-600 rounded-full text-white flex items-center justify-center text-xs font-bold">
+            <button
+              onClick={() => setShowUserMenu(!showUserMenu)}
+              title="Profile Menu"
+              className="w-7 h-7 bg-blue-600 rounded-full text-white flex items-center justify-center text-xs font-bold hover:ring-2 hover:ring-blue-300 transition-all cursor-pointer">
               D
-            </div>
+            </button>
+            {showUserMenu && (
+              <div className="absolute right-0 mt-2 w-48 bg-white border border-gray-100 rounded-lg shadow-xl py-1 z-50">
+                <div className="px-4 py-2 border-b border-gray-100">
+                  <p className="text-sm font-semibold text-gray-800">Digitizer User</p>
+                  <p className="text-xs text-gray-500 truncate">demo@kalpratech.com</p>
+                </div>
+                <button onClick={() => navigate('/')} className="block px-4 py-2 text-sm text-red-600 hover:bg-gray-50 font-medium text-left w-full transition-colors">
+                  Logout
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -2605,113 +3014,111 @@ export default function GraphTrackerV2() {
         <button
           onClick={() => setShowLeftMenu(p => !p)}
           title={showLeftMenu ? 'Hide Menu' : 'Show Menu'}
-          className={`flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-lg border transition-colors ${
-            showLeftMenu ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
-          }`}>
+          className={`flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-lg border transition-colors ${showLeftMenu ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
+            }`}>
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
         </button>
         <div className="w-px h-5 bg-gray-200 flex-shrink-0" />
         {/* centre group */}
         <div className="flex items-center justify-center flex-1 gap-3">
-        {/* Zoom controls */}
-        <div className="flex items-center bg-gray-50 border border-gray-200 rounded divide-x divide-gray-200">
+          {/* Zoom controls */}
+          <div className="flex items-center bg-gray-50 border border-gray-200 rounded divide-x divide-gray-200">
+            {[
+              { label: "🔍⁺ Zoom In", action: () => setZoom(z => Math.min(z + 0.15, 5)) },
+              { label: "🔍⁻ Zoom Out", action: () => setZoom(z => Math.max(z - 0.15, 0.2)) },
+              { label: "📺 Fit", action: () => { setZoom(1); setPanOffset({ x: 0, y: 0 }); } },
+              { label: `${Math.round(zoom * 100)}%`, action: null },
+              { label: "🔄 Reset", action: () => { setZoom(1); setPanOffset({ x: 0, y: 0 }); } },
+            ].map(({ label, action }) => (
+              <button key={label} onClick={action}
+                disabled={!action}
+                className={`px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-white transition-colors ${!action ? "cursor-default" : ""}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="w-px h-5 bg-gray-200" />
+
+          {/* Mode buttons */}
           {[
-            { label: "🔍⁺ Zoom In", action: () => setZoom(z => Math.min(z + 0.15, 5)) },
-            { label: "🔍⁻ Zoom Out", action: () => setZoom(z => Math.max(z - 0.15, 0.2)) },
-            { label: "📺 Fit", action: () => { setZoom(1); setPanOffset({ x: 0, y: 0 }); } },
-            { label: `${Math.round(zoom * 100)}%`, action: null },
-            { label: "🔄 Reset", action: () => { setZoom(1); setPanOffset({ x: 0, y: 0 }); } },
-          ].map(({ label, action }) => (
-            <button key={label} onClick={action}
-              disabled={!action}
-              className={`px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-white transition-colors ${!action ? "cursor-default" : ""}`}>
-              {label}
+            { m: "pan", icon: "🖐️", label: "Pan" },
+            { m: "insert", icon: "📍", label: "Insert Pt." },
+            { m: "delete", icon: "🗑️", label: "Delete Pt." },
+          ].map(({ m, icon, label }) => (
+            <button key={m} onClick={() => setMode(m)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === m
+                ? m === "pan" ? "bg-blue-50 border-blue-300 text-blue-700"
+                  : m === "insert" ? "bg-green-50 border-green-300 text-green-700"
+                    : "bg-red-50 border-red-300 text-red-700"
+                : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}>
+              <span>{icon}</span>{label}
             </button>
           ))}
-        </div>
 
-        <div className="w-px h-5 bg-gray-200" />
-
-        {/* Mode buttons */}
-        {[
-          { m: "pan", icon: "🖐️", label: "Pan" },
-          { m: "insert", icon: "📍", label: "Insert Pt." },
-          { m: "delete", icon: "🗑️", label: "Delete Pt." },
-        ].map(({ m, icon, label }) => (
-          <button key={m} onClick={() => setMode(m)}
-            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === m
-              ? m === "pan" ? "bg-blue-50 border-blue-300 text-blue-700"
-                : m === "insert" ? "bg-green-50 border-green-300 text-green-700"
-                  : "bg-red-50 border-red-300 text-red-700"
+          <button onClick={() => setMode("bounds")}
+            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === "bounds"
+              ? "bg-amber-50 border-amber-300 text-amber-700"
               : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
               }`}>
-            <span>{icon}</span>{label}
+            <span>📐</span>Select Bounds
           </button>
-        ))}
 
-        <button onClick={() => setMode("bounds")}
-          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === "bounds"
-            ? "bg-amber-50 border-amber-300 text-amber-700"
-            : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
-            }`}>
-          <span>📐</span>Select Bounds
-        </button>
+          <button
+            onClick={() => {
+              setSmartCursorView(prev => {
+                const next = !prev;
+                if (!next) {
+                  setHoveredPlot(null);
+                  setTrackingGraph(null);
+                }
+                return next;
+              });
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${smartCursorView
+              ? "bg-purple-50 border-purple-300 text-purple-700"
+              : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
+              }`}>
+            <span>⚡</span>
+            AI Curve Tracking
+          </button>
 
-        <button
-          onClick={() => {
-            setSmartCursorView(prev => {
-              const next = !prev;
-              if (!next) {
-                setHoveredPlot(null);
-                setTrackingGraph(null);
-              }
-              return next;
-            });
-          }}
-          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${smartCursorView
-            ? "bg-purple-50 border-purple-300 text-purple-700"
-            : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
-            }`}>
-          <span>⚡</span>
-          AI Curve Tracking
-        </button>
+          <div className="w-px h-5 bg-gray-200" />
 
-        <div className="w-px h-5 bg-gray-200" />
+          {/* Preview tabs */}
+          <div className="flex items-center bg-gray-50 border border-gray-200 rounded divide-x divide-gray-200">
+            {[
+              { key: "graph", label: "📊 Graph View" },
+              { key: "header", label: "🔍 Header OCR" },
+              { key: "guided", label: "🎯 Guided Tracking" },
+            ].map(tab => (
+              <button key={tab.key} onClick={() => setActiveViewTab(tab.key)}
+                className={`px-2.5 py-1 text-xs font-medium transition-colors ${activeViewTab === tab.key ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-white"}`}>
+                {tab.label}
+              </button>
+            ))}
+          </div>
 
-        {/* Preview tabs */}
-        <div className="flex items-center bg-gray-50 border border-gray-200 rounded divide-x divide-gray-200">
-          {[
-            { key: "graph", label: "📊 Graph View" },
-            { key: "header", label: "🔍 Header OCR" },
-            { key: "guided", label: "🎯 Guided Tracking" },
-          ].map(tab => (
-            <button key={tab.key} onClick={() => setActiveViewTab(tab.key)}
-              className={`px-2.5 py-1 text-xs font-medium transition-colors ${activeViewTab === tab.key ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-white"}`}>
-              {tab.label}
-            </button>
-          ))}
-        </div>
+          <div className="w-px h-5 bg-gray-200" />
 
-        <div className="w-px h-5 bg-gray-200" />
-
-        {/* Undo / Redo in toolbar too */}
-        <button onClick={handleUndo} disabled={!canUndo} title="Undo"
-          className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 rounded border border-gray-200 hover:bg-gray-50 transition-colors ${!canUndo ? "opacity-30 cursor-not-allowed" : ""}`}>
-          ↩️ Undo
-        </button>
-        <button onClick={handleRedo} disabled={!canRedo} title="Redo"
-          className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 rounded border border-gray-200 hover:bg-gray-50 transition-colors ${!canRedo ? "opacity-30 cursor-not-allowed" : ""}`}>
-          ↪️ Redo
-        </button>
+          {/* Undo / Redo in toolbar too */}
+          <button onClick={handleUndo} disabled={!canUndo} title="Undo"
+            className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 rounded border border-gray-200 hover:bg-gray-50 transition-colors ${!canUndo ? "opacity-30 cursor-not-allowed" : ""}`}>
+            ↩️ Undo
+          </button>
+          <button onClick={handleRedo} disabled={!canRedo} title="Redo"
+            className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 rounded border border-gray-200 hover:bg-gray-50 transition-colors ${!canRedo ? "opacity-30 cursor-not-allowed" : ""}`}>
+            ↪️ Redo
+          </button>
         </div>{/* end centre group */}
         <div className="w-px h-5 bg-gray-200 flex-shrink-0" />
         {/* Right panel toggle */}
         <button
           onClick={() => setShowRightMenu(p => !p)}
           title={showRightMenu ? 'Hide Details' : 'Show Details'}
-          className={`flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-lg border transition-colors ${
-            showRightMenu ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
-          }`}>
+          className={`flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-lg border transition-colors ${showRightMenu ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
+            }`}>
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
         </button>
       </div>
@@ -2846,7 +3253,7 @@ export default function GraphTrackerV2() {
                   <img src={headerImageUrl || imageUrl} alt="Detected header preview" className="max-w-full max-h-[calc(100vh-140px)] object-contain rounded-md" />
                 </div>
               </div>
-              
+
               {/* Guided Tracking View (Persistent) */}
               <div className={`absolute inset-0 z-10 overflow-auto bg-gray-50 p-3 ${activeViewTab === "guided" ? "flex flex-col" : "hidden"}`}>
                 <HumanGuidedCurveTracker
@@ -2865,7 +3272,7 @@ export default function GraphTrackerV2() {
                     const newNames = [...curveNames];
                     const newColors = [...curveColors];
                     const newIds = [...curveIds];
-                    
+
                     const newWrapLevels = [...curveWrapLevels];
                     updatedCurves.forEach(curveObj => {
                       // Build a break-separated polyline for wrap curves.
@@ -2914,17 +3321,17 @@ export default function GraphTrackerV2() {
                       }
                     });
                     setCurveWrapLevels(newWrapLevels);
-                    
+
                     setCurveNames(newNames);
                     setCurveColors(newColors);
                     setCurveIds(newIds);
-                    
+
                     setSourceGraphLines(newLines);
                     setGraphBoundaries(newBounds);
                     const newVisibleMap = { ...visibleGraphMap };
                     for (let i = 0; i < newLines.length; i++) { newVisibleMap[i] = true; }
                     setVisibleGraphMap(newVisibleMap);
-                    
+
                     setGraphScales(prev => {
                       const nextScales = [...prev];
                       while (nextScales.length < newLines.length) {
@@ -2937,7 +3344,7 @@ export default function GraphTrackerV2() {
                       }
                       return nextScales;
                     });
-                    
+
                     pushHistory(newLines, newBounds);
                     setActiveViewTab("graph");
                   }}
@@ -3236,11 +3643,10 @@ export default function GraphTrackerV2() {
               <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">LAS Export</p>
               <button onClick={exportAs}
                 disabled={!appliedGraphBoundaries.length || !axisScales.length || !depthScale}
-                className={`w-full flex items-center justify-center gap-2 py-2 px-3 border rounded-lg transition-colors text-xs font-semibold ${
-                  appliedGraphBoundaries.length && axisScales.length && depthScale
-                    ? "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
-                    : "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
-                }`}>
+                className={`w-full flex items-center justify-center gap-2 py-2 px-3 border rounded-lg transition-colors text-xs font-semibold ${appliedGraphBoundaries.length && axisScales.length && depthScale
+                  ? "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
+                  : "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                  }`}>
                 <span className="text-base">📦</span>
                 Export LAS
               </button>

@@ -1193,13 +1193,17 @@ const Canvas = () => {
       });
       if (!cleanedLine || cleanedLine.length === 0) return;
       const graphLabel = getGraphLabel(idx);
-      graph_info[`graph_${graphLabel}`] = {
-        x_range: DEFAULT_X_RANGE,
-        y_range: DEFAULT_Y_RANGE,
-        lines: {
-          [graphLabel]: cleanedLine,
-        },
-      };
+      const baseLabel = graphLabel.split('_')[0];
+      
+      const graphKey = `graph_${baseLabel}`;
+      if (!graph_info[graphKey]) {
+        graph_info[graphKey] = {
+          x_range: DEFAULT_X_RANGE,
+          y_range: DEFAULT_Y_RANGE,
+          lines: {},
+        };
+      }
+      graph_info[graphKey].lines[graphLabel] = cleanedLine;
     });
     return graph_info;
   };

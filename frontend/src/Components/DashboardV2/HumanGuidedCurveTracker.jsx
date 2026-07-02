@@ -28,12 +28,16 @@ const TRACK_API_URL =
 
 const CURVE_COLORS = [
   '#2962FF', '#00C853', '#FF6D00', '#D500F9', '#00B8D4',
-  '#FFD600', '#F50057', '#00BFA5', '#FF6E40', '#6200EA'
+  '#FFD600', '#F50057', '#00BFA5', '#FF6E40', '#6200EA',
+  '#E53935', '#8E24AA', '#3949AB', '#039BE5', '#43A047',
+  '#FDD835', '#FB8C00', '#6D4C41', '#546E7A', '#000000'
 ];
 
 const COLOR_NAMES = [
   'Blue', 'Green', 'Orange', 'Purple', 'Cyan',
-  'Yellow', 'Pink', 'Teal', 'Deep Orange', 'Violet'
+  'Yellow', 'Pink', 'Teal', 'Deep Orange', 'Violet',
+  'Red', 'Plum', 'Indigo', 'Light Blue', 'Leaf Green',
+  'Lemon', 'Dark Orange', 'Brown', 'Blue Grey', 'Black'
 ];
 
 // Fallback only (used when the backend is unreachable): smooth spline
@@ -73,6 +77,7 @@ const newCurve = () => ({
   segments: [],         // legacy (non-wrap) per-segment confidence from backend
   confidence: null,
   source: null,         // 'ai' | 'fallback'
+  hidden: false,
 });
 
 const HumanGuidedCurveTracker = ({
@@ -116,10 +121,26 @@ const HumanGuidedCurveTracker = ({
 
   const getActiveTrackBounds = (points) => {
     if (!points || !points.length || !trackBounds.length) return [-1, -1];
-    const [x, y] = points[0];
+    const [x] = points[0];
+    // Exact containment first.
     for (const b of trackBounds) {
       if (x >= b.left && x <= b.right) return [b.left, b.right];
     }
+    // FIX: a wrapped fragment's edge point is frequently a pixel or two
+    // outside the track rectangle (anti-aliasing / snap-to-darkest-pixel
+    // can nudge it past the boundary line). Previously this fell through
+    // to [-1, -1], which corrupts computeFragmentEdges's tolerance window
+    // (tol = 0.06 * max(right-left,1) with left=right=-1) and makes the
+    // "is this the right edge?" test (x >= trackRight - tol) true for
+    // almost any real image coordinate — silently freezing wrapLevel
+    // detection for the whole curve. Instead, snap to the closest bound.
+    let best = null;
+    let bestDist = Infinity;
+    for (const b of trackBounds) {
+      const d = x < b.left ? b.left - x : x > b.right ? x - b.right : 0;
+      if (d < bestDist) { bestDist = d; best = b; }
+    }
+    if (best && bestDist <= 25) return [best.left, best.right]; // within 25px, treat as that track
     return [-1, -1];
   };
   const activeCurve = curves.find(c => c.id === activeId) || curves[0];
@@ -170,17 +191,33 @@ const HumanGuidedCurveTracker = ({
   // STEP 1: Compute fragment entry/exit edges from its tracked points.
   // Used as a fallback when the backend edge_in/edge_out is null.
   const computeFragmentEdges = (frag, trackLeft, trackRight) => {
-    const pts = frag.points || [];
+    const pts = (frag.points || []).filter(Boolean);
     if (pts.length < 2) return { edgeIn: null, edgeOut: null };
-    const tol = 0.06 * Math.max(trackRight - trackLeft, 1);
+    // FIX: bail out instead of guessing when bounds are unresolved. Silently
+    // treating x >= -1.06 as "at the right edge" (the old behavior when
+    // trackLeft/trackRight came back as -1) made every point look like a
+    // right-edge exit, which corrupted wrapLevel for the whole curve.
+    if (trackLeft == null || trackRight == null || trackLeft < 0 || trackRight < 0 || trackRight <= trackLeft) {
+      return { edgeIn: null, edgeOut: null };
+    }
+    const width = trackRight - trackLeft;
+    // FIX: 6% of a wide track (e.g. 1000px) is 60px of slack — too loose.
+    // 6% of a narrow track (e.g. 80px) is under 5px — too tight for a
+    // hand-clicked or snapped endpoint. Use a hybrid absolute+relative
+    // tolerance instead so detection is consistent across track widths.
+    const tol = Math.max(6, Math.min(0.08 * width, 20));
     const edgeOf = (x) => {
       if (x <= trackLeft + tol) return 'left';
       if (x >= trackRight - tol) return 'right';
       return null;
     };
     const sorted = [...pts].sort((a, b) => a[1] - b[1]); // sort by y (depth)
-    const topX = sorted[0][0];
-    const botX = sorted[sorted.length - 1][0];
+    // FIX: average a small window of points near each end instead of a
+    // single endpoint, so one noisy/mis-clicked point can't flip the
+    // edge classification (and therefore the wrap level) for the piece.
+    const windowAvgX = (arr) => arr.reduce((s, p) => s + p[0], 0) / arr.length;
+    const topX = windowAvgX(sorted.slice(0, Math.min(3, sorted.length)));
+    const botX = windowAvgX(sorted.slice(-Math.min(3, sorted.length)));
     return { edgeIn: edgeOf(topX), edgeOut: edgeOf(botX) };
   };
 
@@ -213,9 +250,19 @@ const HumanGuidedCurveTracker = ({
       const prevOut = frags[i - 1].edgeOut;
       const thisIn  = frags[i].edgeIn;
       let step = 0;
+      let ambiguous = false;
       if (prevOut === 'right' && thisIn === 'left')  step = +1; // value crossed Vmax upward
-      if (prevOut === 'left'  && thisIn === 'right') step = -1; // value crossed Vmin downward
-      frags[i] = { ...frags[i], wrapLevel: frags[i - 1].wrapLevel + step };
+      else if (prevOut === 'left'  && thisIn === 'right') step = -1; // value crossed Vmin downward
+      else if (prevOut !== thisIn) {
+        // FIX: previously any transition that wasn't a clean right→left or
+        // left→right match silently fell through to step = 0 (treated as
+        // "same decade as before"). That is only correct if the piece
+        // genuinely didn't wrap — but it's indistinguishable from a failed
+        // edge-detection. Flag it so the UI can warn instead of exporting
+        // a silently-wrong value for this piece.
+        ambiguous = true;
+      }
+      frags[i] = { ...frags[i], wrapLevel: frags[i - 1].wrapLevel + step, wrapAmbiguous: ambiguous };
     }
     return { ...curve, fragments: frags };
   };
@@ -255,8 +302,8 @@ const HumanGuidedCurveTracker = ({
       if (!fragments.length && cc.points && cc.points.length > 1) {
         fragments = [{
           id: `frag-${Date.now()}-0`,
-          points: cc.points.map(p => [...p]), // verbatim copy
-          anchors: (cc.anchors || []).map(p => [...p]), // keep few user anchors
+          points: cc.points.map(p => p ? [...p] : null), // verbatim copy, preserving null breaks
+          anchors: (cc.anchors || []).map(p => p ? [...p] : null), // keep few user anchors
           segments: cc.segments || [],
           confidence: cc.confidence ?? null,
           wrapLevel: 0,
@@ -432,7 +479,7 @@ const HumanGuidedCurveTracker = ({
       const [x, y] = canvasCoords({ clientX: panStart.current.x, clientY: panStart.current.y });
       pushHistory();
       // Dashed curves: use a wider snap radius so a click in a gap still finds the nearest dash.
-      const snapRadius = activeCurve.style === 'dashed' ? 30 : 15;
+      const snapRadius = (activeCurve.style === 'dashed' || activeCurve.style === 'dotted') ? 30 : 15;
       const [sx, sy] = snapToDarkestPixel(x, y, snapRadius);
       
       let updatedCurve;
@@ -459,7 +506,7 @@ const HumanGuidedCurveTracker = ({
     if (dragging) {
       const targetCurve = curves.find(c => c.id === dragging.curveId);
       if (targetCurve) {
-        const dragSnapRadius = targetCurve.style === 'dashed' ? 30 : 15;
+        const dragSnapRadius = (targetCurve.style === 'dashed' || targetCurve.style === 'dotted') ? 30 : 15;
         let updatedCurve;
         if (targetCurve.wrapMode) {
           updatedCurve = {
@@ -528,15 +575,21 @@ const HumanGuidedCurveTracker = ({
     ctx.drawImage(imageRef.current, 0, 0);
 
     for (const c of curves) {
+      if (c.hidden) continue;
       const isActive = c.id === activeId;
       const displayStyle = c.detected_style || c.style;
-      const dash = displayStyle === 'dashed' ? [6, 4] : [];
+      const dash = displayStyle === 'dashed' ? [6, 4] : displayStyle === 'dotted' ? [2, 4] : [];
 
       // 1) NORMAL traced path — ALWAYS draw if present.
       if (c.points && c.points.length > 1) {
         ctx.beginPath();
-        ctx.moveTo(c.points[0][0], c.points[0][1]);
-        for (let i = 1; i < c.points.length; i++) ctx.lineTo(c.points[i][0], c.points[i][1]);
+        let penDown = false;
+        for (let i = 0; i < c.points.length; i++) {
+          const p = c.points[i];
+          if (!p) { penDown = false; continue; }  // null = wrap-jump break
+          if (!penDown) { ctx.moveTo(p[0], p[1]); penDown = true; }
+          else ctx.lineTo(p[0], p[1]);
+        }
         ctx.strokeStyle = c.color;
         ctx.setLineDash(dash);
         ctx.globalAlpha = c.wrapMode ? 0.25 : 1.0;
@@ -550,7 +603,7 @@ const HumanGuidedCurveTracker = ({
       if (!c.wrapMode && c.segments && c.id === activeId) {
         c.segments.forEach(seg => {
           if (seg.needs_anchor) {
-            const segPts = c.points.filter(p => p[1] >= seg.from[1] && p[1] <= seg.to[1]);
+            const segPts = (c.points || []).filter(p => p && p[1] >= seg.from[1] && p[1] <= seg.to[1]);
             if (segPts.length > 1) {
               ctx.beginPath();
               ctx.moveTo(segPts[0][0], segPts[0][1]);
@@ -584,11 +637,17 @@ const HumanGuidedCurveTracker = ({
       // 2) FRAGMENTS — ALWAYS draw if present, each as its OWN path
       if (c.fragments && c.fragments.length) {
         c.fragments.forEach(frag => {
-          if (!frag.points || frag.points.length < 2) return;
+          const realPts = (frag.points || []).filter(p => p !== null);
+          if (!frag.points || realPts.length < 2) return;
           const isActiveFrag = isActive && frag.id === c.activeFragmentId;
           ctx.beginPath();
-          ctx.moveTo(frag.points[0][0], frag.points[0][1]);
-          for (let i = 1; i < frag.points.length; i++) ctx.lineTo(frag.points[i][0], frag.points[i][1]);
+          let penDown = false;
+          for (let i = 0; i < frag.points.length; i++) {
+            const p = frag.points[i];
+            if (!p) { penDown = false; continue; }  // null = wrap-jump break
+            if (!penDown) { ctx.moveTo(p[0], p[1]); penDown = true; }
+            else ctx.lineTo(p[0], p[1]);
+          }
           ctx.strokeStyle = c.color;
           ctx.setLineDash(dash);
           ctx.globalAlpha = frag.locked ? 0.8 : 1.0;
@@ -596,11 +655,14 @@ const HumanGuidedCurveTracker = ({
           ctx.stroke();
           ctx.setLineDash([]);
           ctx.globalAlpha = 1.0;
-          // wrap-level tag
-          const [tx, ty] = frag.points[0];
-          ctx.fillStyle = c.color;
-          ctx.font = 'bold 11px sans-serif';
-          ctx.fillText(`L${frag.wrapLevel > 0 ? '+' : ''}${frag.wrapLevel}`, tx + 6, ty + 4);
+          // wrap-level tag (use first non-null point)
+          const firstPt = frag.points.find(p => p !== null);
+          if (firstPt) {
+            const [tx, ty] = firstPt;
+            ctx.fillStyle = c.color;
+            ctx.font = 'bold 11px sans-serif';
+            ctx.fillText(`L${frag.wrapLevel > 0 ? '+' : ''}${frag.wrapLevel}`, tx + 6, ty + 4);
+          }
         });
       }
 
@@ -632,7 +694,18 @@ const HumanGuidedCurveTracker = ({
 
 
   /* ---------------- AI tracking ---------------- */
-  const handleTrackCurve = async (curveOverride) => {
+  const debounceRef = useRef(null);
+  const abortControllerRef = useRef(null);
+  const cachedImageIdRef = useRef(null);
+
+  useEffect(() => {
+    cachedImageIdRef.current = null;
+  }, [imageUrl]);
+
+  const handleTrackCurve = (curveOverride) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    debounceRef.current = setTimeout(async () => {
     const c = curveOverride && curveOverride.id ? curveOverride : activeCurve;
     const isWrap = c.wrapMode;
       const activeFrag = isWrap ? c.fragments.find(f => f.id === c.activeFragmentId) : null;
@@ -646,11 +719,16 @@ const HumanGuidedCurveTracker = ({
     setTracking(true);
     setError(null);
     try {
-      const blob = await fetch(imageUrl).then(r => r.blob());
       const form = new FormData();
-      const name = blob.type.includes('tiff') ? 'image.tif'
-        : blob.type.includes('jpeg') ? 'image.jpg' : 'image.png';
-      form.append('file', blob, name);
+      if (cachedImageIdRef.current) {
+        form.append('image_id', cachedImageIdRef.current);
+      } else {
+        const blob = await fetch(imageUrl).then(r => r.blob());
+        const name = blob.type.includes('tiff') ? 'image.tif'
+          : blob.type.includes('jpeg') ? 'image.jpg' : 'image.png';
+        form.append('file', blob, name);
+      }
+
       form.append('points', JSON.stringify(targetAnchors));
       form.append('curve_style', c.style || 'auto');
       
@@ -661,13 +739,41 @@ const HumanGuidedCurveTracker = ({
         if (trackRight >= 0) form.append('x_max', Math.round(trackRight));
       }
 
-      const res = await fetch(endpoint, { method: 'POST', body: form });
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      abortControllerRef.current = new AbortController();
+
+      let res = await fetch(endpoint, { 
+        method: 'POST', 
+        body: form,
+        signal: abortControllerRef.current.signal 
+      });
+
+      if (res.status === 409 && cachedImageIdRef.current) {
+        // Cache expired, retry with full blob
+        cachedImageIdRef.current = null;
+        form.delete('image_id');
+        const blob = await fetch(imageUrl).then(r => r.blob());
+        const name = blob.type.includes('tiff') ? 'image.tif' : 'image.png';
+        form.append('file', blob, name);
+        if (abortControllerRef.current) abortControllerRef.current.abort();
+        abortControllerRef.current = new AbortController();
+        res = await fetch(endpoint, { 
+          method: 'POST', body: form, signal: abortControllerRef.current.signal 
+        });
+      }
+
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
         throw new Error(detail.detail || `Server returned ${res.status}`);
       }
       const data = await res.json();
       
+      if (data.image_id) {
+        cachedImageIdRef.current = data.image_id;
+      }
+
       if (isWrap) {
         const updatedFrag = {
           ...activeFrag,
@@ -699,6 +805,7 @@ const HumanGuidedCurveTracker = ({
         setCurves(prev => prev.map(cu => (cu.id === c.id ? tracked : cu)));
       }
     } catch (err) {
+      if (err.name === 'AbortError') return; // Ignore aborted requests
       if (isWrap) {
         setCurves(prev => prev.map(cu => cu.id === c.id ? {
           ...cu, fragments: cu.fragments.map(f => f.id === activeFrag.id ? { ...f, points: [], confidence: null } : f), source: 'fallback'
@@ -712,6 +819,7 @@ const HumanGuidedCurveTracker = ({
     } finally {
       setTracking(false);
     }
+    }, 150);
   };
 
 
@@ -906,6 +1014,7 @@ const HumanGuidedCurveTracker = ({
               <option value="auto">Auto</option>
               <option value="solid">Solid</option>
               <option value="dashed">Dashed</option>
+              <option value="dotted">Dotted</option>
             </select>
             <span className="text-[10px] text-gray-400">{c.wrapMode ? `${c.fragments.length} frags` : `${c.anchors.length}pt`}</span>
             {c.confidence != null && (
@@ -913,9 +1022,21 @@ const HumanGuidedCurveTracker = ({
                 {(c.confidence * 100).toFixed(0)}%
               </span>
             )}
+            <button onClick={e => {
+              e.stopPropagation();
+              setCurves(prev => prev.map(cu => cu.id === c.id ? { ...cu, hidden: !cu.hidden } : cu));
+            }} className="text-gray-400 hover:text-gray-600 ml-1" title={c.hidden ? "Show curve" : "Hide curve"}>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                {c.hidden ? (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+                ) : (
+                  <><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></>
+                )}
+              </svg>
+            </button>
             {curves.length > 1 && (
               <button onClick={e => { e.stopPropagation(); removeCurve(c.id); }}
-                className="text-gray-300 hover:text-red-500 font-bold">×</button>
+                className="text-gray-300 hover:text-red-500 font-bold ml-0.5">×</button>
             )}
           </div>
         ))}
@@ -936,8 +1057,8 @@ const HumanGuidedCurveTracker = ({
             {activeCurve.fragments.map((f, i) => (
               <div key={f.id} 
                 onClick={() => updateActive(c => ({ ...c, activeFragmentId: f.id }))}
-                className={`flex items-center gap-1.5 px-2 py-1 rounded text-[10px] border cursor-pointer transition-colors ${f.id === activeCurve.activeFragmentId ? 'bg-amber-200 border-amber-400 font-bold' : 'bg-white border-amber-200 hover:bg-amber-100'}`}>
-                <span>Piece {i+1} (L{f.wrapLevel > 0 ? '+' : ''}{f.wrapLevel})</span>
+                className={`flex items-center gap-1.5 px-2 py-1 rounded text-[10px] border cursor-pointer transition-colors ${f.id === activeCurve.activeFragmentId ? 'bg-amber-200 border-amber-400 font-bold' : (f.wrapAmbiguous && !f.wrapLevelManual) ? 'bg-red-50 border-red-400' : 'bg-white border-amber-200 hover:bg-amber-100'}`}>
+                <span>Piece {i+1} (L{f.wrapLevel > 0 ? '+' : ''}{f.wrapLevel}){f.wrapAmbiguous && !f.wrapLevelManual ? ' ⚠️' : ''}</span>
                 <div className="flex items-center gap-0.5 bg-white/80 rounded px-0.5 border border-amber-300">
                   <button onClick={e => {
                     e.stopPropagation();
