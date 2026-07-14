@@ -50,6 +50,51 @@ export default defineConfig({
         changeOrigin: true,
         secure: false,
       },
+      '/guided-curve-track': {
+        target: LOCAL_PYTHON_URL,
+        changeOrigin: true,
+        secure: false,
+      },
+      '/convert-image': {
+        target: LOCAL_PYTHON_URL,
+        changeOrigin: true,
+        secure: false,
+      },
+      '/extract-pdf-images': {
+        target: LOCAL_PYTHON_URL,
+        changeOrigin: true,
+        secure: false,
+      },
+      '/pdf-image': {
+        target: LOCAL_PYTHON_URL,
+        changeOrigin: true,
+        secure: false,
+      },
+      '/analyze-graph-image': {
+        target: LOCAL_PYTHON_URL,
+        changeOrigin: true,
+        secure: false,
+      },
+      '/tiff-chunk-detect': {
+        target: LOCAL_PYTHON_URL,
+        changeOrigin: true,
+        secure: false,
+      },
+      '/create-las-file': {
+        target: LOCAL_PYTHON_URL,
+        changeOrigin: true,
+        secure: false,
+      },
+      '/create-las-from-coords': {
+        target: LOCAL_PYTHON_URL,
+        changeOrigin: true,
+        secure: false,
+      },
+      '/decode-las': {
+        target: LOCAL_PYTHON_URL,
+        changeOrigin: true,
+        secure: false,
+      },
     },
   },
 })

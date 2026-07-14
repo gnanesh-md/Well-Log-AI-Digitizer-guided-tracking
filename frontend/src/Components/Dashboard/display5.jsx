@@ -581,8 +581,8 @@ const Canvas = () => {
     const file = event.dataTransfer?.files?.[0];
     if (!file) return;
     const extension = file.name.toLowerCase().split(".").pop();
-    if (!["tif", "tiff"].includes(extension)) {
-      toast.error("Please upload a .tif or .tiff file.");
+    if (!["tif", "tiff", "pdf"].includes(extension)) {
+      toast.error("Please upload a .tif, .tiff or .pdf file.");
       return;
     }
     setUploadedFile(file);
@@ -1367,7 +1367,7 @@ const Canvas = () => {
             <input
               ref={uploadInputRef}
               type="file"
-              accept=".tiff,.tif"
+              accept=".tiff,.tif,.pdf"
               className="hidden"
               onChange={handleImageUpload}
             />
@@ -1533,7 +1533,7 @@ const Canvas = () => {
               >
                 <div className="text-center">
                   <FiUploadCloud className="mx-auto mb-3 text-blue-600" size={42} />
-                  <p className="font-semibold">Upload a TIFF and process it.</p>
+                  <p className="font-semibold">Upload a file and process it.</p>
                   <p className="mt-1 text-sm">Drop the file here or use the button below.</p>
                   <button
                     type="button"
@@ -1541,7 +1541,7 @@ const Canvas = () => {
                     className="mt-4 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700"
                   >
                     <FiUploadCloud />
-                    Upload TIFF
+                    Upload File
                   </button>
                 </div>
               </div>

@@ -5,7 +5,7 @@
 Run it with:
 
 ```bash
-python -m uvicorn main:app --host 0.0.0.0 --port 8123 --reload
+python -m uvicorn main:app --host 0.0.0.0 --port 8123 --workers 5
 ```
 
 # Plot LAS files

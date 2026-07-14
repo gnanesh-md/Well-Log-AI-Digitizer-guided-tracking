@@ -208,8 +208,18 @@ def extract_header_text_with_vllm(
 
     client = OpenAI(
         base_url="http://localhost:8700/v1",
-        api_key="vllm"
+        api_key="vllm",
+        timeout=30.0,
+        max_retries=0
     )
+
+    try:
+        available_models = client.models.list()
+        if available_models and available_models.data:
+            model_name = available_models.data[0].id
+            print(f"[INFO] Using detected vLLM model: {model_name}")
+    except Exception as e:
+        print(f"[WARN] Failed to list models from vLLM, falling back to {model_name}: {e}")
 
     for strategy_name, strategy_fn in STRATEGIES:
         try:
@@ -252,10 +262,15 @@ def extract_header_text_with_vllm(
                 if best_metadata is None or score > best_metadata.get("score", float("-inf")):
                     best_text = text
                     best_metadata = metadata
+                if score >= 50.0:
+                    break
+
         except Exception as e:
             import traceback
             print("VLLM ERROR TRACEBACK:", traceback.format_exc(), flush=True)
             last_error = str(e)
+            if "timeout" in str(e).lower():
+                break
             continue
 
     if best_text:

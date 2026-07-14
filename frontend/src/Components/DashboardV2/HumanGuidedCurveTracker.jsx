@@ -24,7 +24,7 @@ const TRACK_API_URL =
   (typeof import.meta !== 'undefined' &&
     import.meta.env &&
     import.meta.env.VITE_GRAPH_GUIDED_TRACK) ||
-  'http://127.0.0.1:8123/guided-curve-track';
+  '/guided-curve-track';
 
 const CURVE_COLORS = [
   '#2962FF', '#00C853', '#FF6D00', '#D500F9', '#00B8D4',
@@ -89,7 +89,18 @@ const HumanGuidedCurveTracker = ({
   zoom: parentZoom,
   setZoom: parentSetZoom,
   panOffset: parentPanOffset,
-  setPanOffset: parentSetPanOffset
+  setPanOffset: parentSetPanOffset,
+  curveThickness = 1.5,
+  lasMode,
+  setLasMode,
+  manualSelections = [],
+  setManualSelections,
+  manualGridInfo,
+  activeSelectionId,
+  setActiveSelectionId,
+  onAddLasRegion,
+  onManualGridRecompute,
+  imageDimensions
 }) => {
   const canvasRef = useRef(null);
   const imageRef = useRef(null);
@@ -106,6 +117,12 @@ const HumanGuidedCurveTracker = ({
   const zoom = parentZoom ?? localZoom;
   const setZoom = parentSetZoom ?? setLocalZoom;
 
+  const [gridEditMode, setGridEditMode] = useState(false); // when true: clicks move/resize boxes, not place anchors
+  const [boxDrag, setBoxDrag] = useState(null);            // { selId, edge | 'move', startImg, startBounds }
+  const BOX_EDGE_HIT = 8; // px in image space
+
+
+
   const [colorPickerOpen, setColorPickerOpen] = useState(null);
   const [editingCurveId, setEditingCurveId] = useState(null);
   const [panMode, setPanMode] = useState(false);
@@ -120,28 +137,21 @@ const HumanGuidedCurveTracker = ({
   const endpoint = apiUrl || TRACK_API_URL;
 
   const getActiveTrackBounds = (points) => {
-    if (!points || !points.length || !trackBounds.length) return [-1, -1];
-    const [x] = points[0];
-    // Exact containment first.
-    for (const b of trackBounds) {
-      if (x >= b.left && x <= b.right) return [b.left, b.right];
+    if (!points?.length || !trackBounds.length) return [-1, -1];
+    const votes = new Map();
+    for (const [x] of points) {
+      for (const b of trackBounds) {
+        const d = x < b.left ? b.left - x : x > b.right ? x - b.right : 0;
+        if (d <= 25) {
+          const key = `${b.left}:${b.right}`;
+          votes.set(key, (votes.get(key) || 0) + 1);
+        }
+      }
     }
-    // FIX: a wrapped fragment's edge point is frequently a pixel or two
-    // outside the track rectangle (anti-aliasing / snap-to-darkest-pixel
-    // can nudge it past the boundary line). Previously this fell through
-    // to [-1, -1], which corrupts computeFragmentEdges's tolerance window
-    // (tol = 0.06 * max(right-left,1) with left=right=-1) and makes the
-    // "is this the right edge?" test (x >= trackRight - tol) true for
-    // almost any real image coordinate — silently freezing wrapLevel
-    // detection for the whole curve. Instead, snap to the closest bound.
-    let best = null;
-    let bestDist = Infinity;
-    for (const b of trackBounds) {
-      const d = x < b.left ? b.left - x : x > b.right ? x - b.right : 0;
-      if (d < bestDist) { bestDist = d; best = b; }
-    }
-    if (best && bestDist <= 25) return [best.left, best.right]; // within 25px, treat as that track
-    return [-1, -1];
+    if (!votes.size) return [-1, -1];
+    const [bestKey] = [...votes.entries()].sort((a, b) => b[1] - a[1])[0];
+    const [l, r] = bestKey.split(':').map(Number);
+    return [l, r];
   };
   const activeCurve = curves.find(c => c.id === activeId) || curves[0];
 
@@ -159,6 +169,8 @@ const HumanGuidedCurveTracker = ({
       redrawRef.current && redrawRef.current();
     };
   }, [imageUrl]);
+
+
 
   /* ---------------- client-side snap (visual nicety only;
         the backend re-snaps with the learned appearance model) ------- */
@@ -343,6 +355,25 @@ const HumanGuidedCurveTracker = ({
   /* ---------------- mouse interaction ---------------- */
   const ANCHOR_HIT_RADIUS = 10;
 
+  const hitTestBox = (x, y) => {
+    // topmost first
+    for (let i = manualSelections.length - 1; i >= 0; i--) {
+      const s = manualSelections[i]; const b = s.bounds; if (!b) continue;
+      const nearL = Math.abs(x - b.left) <= BOX_EDGE_HIT;
+      const nearR = Math.abs(x - b.right) <= BOX_EDGE_HIT;
+      const nearT = Math.abs(y - b.top) <= BOX_EDGE_HIT;
+      const nearB = Math.abs(y - b.bottom) <= BOX_EDGE_HIT;
+      const insideX = x >= b.left - BOX_EDGE_HIT && x <= b.right + BOX_EDGE_HIT;
+      const insideY = y >= b.top - BOX_EDGE_HIT && y <= b.bottom + BOX_EDGE_HIT;
+      if (insideY && nearL) return { selId: s.id, edge: 'left' };
+      if (insideY && nearR) return { selId: s.id, edge: 'right' };
+      if (insideX && nearT) return { selId: s.id, edge: 'top' };
+      if (insideX && nearB) return { selId: s.id, edge: 'bottom' };
+      if (x > b.left && x < b.right && y > b.top && y < b.bottom) return { selId: s.id, edge: 'move' };
+    }
+    return null;
+  };
+
   const findAnchorAt = (x, y) => {
     for (const c of curves) {
       if (c.wrapMode) {
@@ -369,11 +400,27 @@ const HumanGuidedCurveTracker = ({
   const handleMouseDown = (e) => {
     if (e.button === 2) { e.preventDefault(); return; }
 
+    if (gridEditMode && !panMode) {
+      const [x, y] = canvasCoords(e);
+      const hit = hitTestBox(x, y);
+      if (hit) {
+        const sel = manualSelections.find(s => s.id === hit.selId);
+        setActiveSelectionId?.(hit.selId);
+        setBoxDrag({ selId: hit.selId, edge: hit.edge, startImg: [x, y], startBounds: { ...sel.bounds } });
+        return; // do NOT place an anchor
+      }
+      // clicking empty space in grid mode: just deselect, don't place an anchor
+      setActiveSelectionId?.(null);
+      return;
+    }
+
     if (panMode) {
       setIsPanning(true);
       panStart.current = { x: e.clientX, y: e.clientY };
       return;
     }
+
+
 
     const [x, y] = canvasCoords(e);
     const hit = findAnchorAt(x, y);
@@ -437,6 +484,29 @@ const HumanGuidedCurveTracker = ({
       }
     }
 
+    if (boxDrag) {
+      const [x, y] = canvasCoords(e);
+      const dx = x - boxDrag.startImg[0];
+      const dy = y - boxDrag.startImg[1];
+      const W = imageDimensions?.width || Infinity;
+      const H = imageDimensions?.height || Infinity;
+      setManualSelections?.(prev => prev.map(s => {
+        if (s.id !== boxDrag.selId) return s;
+        const bb = { ...boxDrag.startBounds };
+        if (boxDrag.edge === 'move') {
+          bb.left += dx; bb.right += dx; bb.top += dy; bb.bottom += dy;
+        } else if (boxDrag.edge === 'left') bb.left = Math.min(bb.right - 4, boxDrag.startBounds.left + dx);
+        else if (boxDrag.edge === 'right') bb.right = Math.max(bb.left + 4, boxDrag.startBounds.right + dx);
+        else if (boxDrag.edge === 'top') bb.top = Math.min(bb.bottom - 4, boxDrag.startBounds.top + dy);
+        else if (boxDrag.edge === 'bottom') bb.bottom = Math.max(bb.top + 4, boxDrag.startBounds.bottom + dy);
+        // clamp to image
+        bb.left = Math.max(0, Math.min(bb.left, W)); bb.right = Math.max(0, Math.min(bb.right, W));
+        bb.top = Math.max(0, Math.min(bb.top, H)); bb.bottom = Math.max(0, Math.min(bb.bottom, H));
+        return { ...s, bounds: bb };
+      }));
+      return; // don't fall through to panning / anchor drag
+    }
+
     // Pan mode or dynamically triggered pan from Place mode
     if (panStart.current && !panStart.current.isPotentialClick) {
       const dx = e.clientX - panStart.current.x;
@@ -468,6 +538,12 @@ const HumanGuidedCurveTracker = ({
   };
 
   const handleMouseUp = (e) => {
+    if (boxDrag) {
+      setBoxDrag(null);
+      onManualGridRecompute?.();
+      return;
+    }
+
     if (isPanning) {
       setIsPanning(false);
       panStart.current = null;
@@ -590,10 +666,17 @@ const HumanGuidedCurveTracker = ({
           if (!penDown) { ctx.moveTo(p[0], p[1]); penDown = true; }
           else ctx.lineTo(p[0], p[1]);
         }
-        ctx.strokeStyle = c.color;
-        ctx.setLineDash(dash);
-        ctx.globalAlpha = c.wrapMode ? 0.25 : 1.0;
-        ctx.lineWidth = isActive ? 5.0 : 3.0;
+        if (c.source === 'fallback') {
+          ctx.strokeStyle = '#9ca3af';
+          ctx.setLineDash([2, 4]);
+          ctx.globalAlpha = 0.8;
+          ctx.lineWidth = isActive ? 2.0 : 1.5;
+        } else {
+          ctx.strokeStyle = c.color;
+          ctx.setLineDash(dash);
+          ctx.globalAlpha = c.wrapMode ? 0.25 : 1.0;
+          ctx.lineWidth = isActive ? curveThickness + 1.0 : curveThickness;
+        }
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.globalAlpha = 1.0;
@@ -648,10 +731,17 @@ const HumanGuidedCurveTracker = ({
             if (!penDown) { ctx.moveTo(p[0], p[1]); penDown = true; }
             else ctx.lineTo(p[0], p[1]);
           }
-          ctx.strokeStyle = c.color;
-          ctx.setLineDash(dash);
-          ctx.globalAlpha = frag.locked ? 0.8 : 1.0;
-          ctx.lineWidth = isActiveFrag ? 5.5 : (isActive ? 4.0 : 3.0);
+          if (c.source === 'fallback') {
+            ctx.strokeStyle = '#9ca3af';
+            ctx.setLineDash([2, 4]);
+            ctx.globalAlpha = 0.8;
+            ctx.lineWidth = isActiveFrag ? 2.0 : 1.5;
+          } else {
+            ctx.strokeStyle = c.color;
+            ctx.setLineDash(dash);
+            ctx.globalAlpha = frag.locked ? 0.8 : 1.0;
+            ctx.lineWidth = isActiveFrag ? curveThickness + 1.0 : (isActive ? curveThickness + 0.5 : curveThickness);
+          }
           ctx.stroke();
           ctx.setLineDash([]);
           ctx.globalAlpha = 1.0;
@@ -688,7 +778,52 @@ const HumanGuidedCurveTracker = ({
         (c.anchors || []).forEach((p, idx) => strokeAnchor(p, idx, isActive));
       }
     }
-  }, [curves, activeId]);
+
+    // --- manual LAS row/column boxes (image-space; canvas is CSS-scaled) ---
+    if (Array.isArray(manualSelections)) {
+      for (const sel of manualSelections) {
+        if (!gridEditMode && sel.type !== 'column') continue;
+
+        const b = sel.bounds; if (!b) continue;
+
+        if (!gridEditMode) {
+          ctx.save();
+          const curveColor = curves.find(c => c.id === sel.id)?.color || '#10B981';
+          ctx.strokeStyle = curveColor;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([5, 4]);
+          ctx.strokeRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+          ctx.restore();
+          continue;
+        }
+
+        const active = sel.id === activeSelectionId;
+        ctx.save();
+        ctx.strokeStyle = active ? '#2563EB' : (sel.type === 'column' ? '#10B981' : '#F59E0B');
+        ctx.fillStyle = active ? 'rgba(37,99,235,0.08)' : 'rgba(16,185,129,0.05)';
+        ctx.lineWidth = active ? 2 : 1.5;
+        ctx.setLineDash(active ? [8, 4] : [6, 4]);
+        ctx.fillRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+        ctx.strokeRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+        ctx.setLineDash([]);
+        // label
+        ctx.fillStyle = active ? '#2563EB' : (sel.type === 'column' ? '#10B981' : '#B45309');
+        ctx.fillRect(b.left, b.top - 16, 130, 16);
+        ctx.fillStyle = '#fff';
+        ctx.font = '11px sans-serif';
+        ctx.fillText(`${sel.label || sel.type} (${sel.type})`, b.left + 4, b.top - 4);
+        // edge handles when active
+        if (active) {
+          const midX = (b.left + b.right) / 2, midY = (b.top + b.bottom) / 2;
+          const hs = [[b.left, midY], [b.right, midY], [midX, b.top], [midX, b.bottom]];
+          ctx.fillStyle = '#2563EB'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+          for (const [hx, hy] of hs) { ctx.beginPath(); ctx.arc(hx, hy, 5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke(); }
+        }
+        ctx.restore();
+      }
+    }
+
+  }, [curves, activeId, manualSelections, activeSelectionId, gridEditMode]);
   redrawRef.current = redraw;
   useEffect(() => { redraw(); }, [redraw]);
 
@@ -733,11 +868,9 @@ const HumanGuidedCurveTracker = ({
       form.append('curve_style', c.style || 'auto');
       
       const [trackLeft, trackRight] = getActiveTrackBounds(targetAnchors);
-      if (isWrap) {
-        form.append('corridor_pad', 40);
-        if (trackLeft >= 0) form.append('x_min', Math.round(trackLeft));
-        if (trackRight >= 0) form.append('x_max', Math.round(trackRight));
-      }
+      if (trackLeft >= 0) form.append('x_min', Math.round(trackLeft));
+      if (trackRight >= 0) form.append('x_max', Math.round(trackRight));
+      if (isWrap) form.append('corridor_pad', 100);
 
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
@@ -806,16 +939,25 @@ const HumanGuidedCurveTracker = ({
       }
     } catch (err) {
       if (err.name === 'AbortError') return; // Ignore aborted requests
+      
+      const isLowRes = err.message.includes('Image resolution too low');
+      const fallbackPoints = isLowRes ? [] : catmullRomSpline(targetAnchors);
+      
       if (isWrap) {
         setCurves(prev => prev.map(cu => cu.id === c.id ? {
-          ...cu, fragments: cu.fragments.map(f => f.id === activeFrag.id ? { ...f, points: [], confidence: null } : f), source: 'fallback'
+          ...cu, fragments: cu.fragments.map(f => f.id === activeFrag.id ? { ...f, points: fallbackPoints, confidence: null } : f), source: isLowRes ? 'failed' : 'fallback'
         } : cu));
       } else {
         setCurves(prev => prev.map(cu => (cu.id === c.id ? {
-          ...cu, points: [], segments: [], confidence: null, source: 'fallback'
+          ...cu, points: fallbackPoints, segments: [], confidence: null, source: isLowRes ? 'failed' : 'fallback'
         } : cu)));
       }
-      setError(`AI tracking unavailable (${err.message}).`);
+      
+      if (isLowRes) {
+        setError(err.message);
+      } else {
+        setError(`Tracking service failed — showing manual spline. (${err.message})`);
+      }
     } finally {
       setTracking(false);
     }
@@ -856,13 +998,13 @@ const HumanGuidedCurveTracker = ({
 
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 bg-gray-100">
+    <div className={`flex flex-col flex-1 min-h-0 bg-gray-100 ${gridEditMode ? 'cursor-move' : ''}`}>
 
-      {/* ── TOP TOOLBAR (3-column grid for centered title) ─────────────────── */}
-      <div className="h-10 bg-white border-b border-gray-200 grid grid-cols-3 items-center px-3 shrink-0">
+      {/* ── TOP TOOLBAR ─────────────────── */}
+      <div className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-3 shrink-0 gap-2 overflow-x-auto whitespace-nowrap">
 
         {/* LEFT: Actions */}
-        <div className="flex items-center gap-1.5 justify-start">
+        <div className="flex items-center gap-1.5 shrink-0">
           <button onClick={clearActive}
             className="px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded text-gray-700 font-medium transition-colors">
             🗑️ Clear
@@ -934,17 +1076,13 @@ const HumanGuidedCurveTracker = ({
                 ? 'bg-green-600 hover:bg-green-700 text-white'
                 : 'bg-gray-200 text-gray-400 cursor-not-allowed'
             }`}>
-            💾 Save &amp; Return
+            💾 Save & Return
           </button>
-        </div>
 
-        {/* CENTER: Title */}
-        <div className="flex items-center justify-center">
-          <span className="text-xs font-bold text-gray-800 tracking-wide uppercase">🎯 Guided Tracking</span>
         </div>
 
         {/* RIGHT: Pan & Zoom */}
-        <div className="flex items-center gap-2 justify-end">
+        <div className="flex items-center gap-2 justify-end shrink-0">
           <button onClick={() => setPanMode(p => !p)}
             title={panMode ? 'Switch to Place Anchor mode' : 'Switch to Pan mode'}
             className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded border transition-colors ${
@@ -1135,10 +1273,17 @@ const HumanGuidedCurveTracker = ({
         <div className="shrink-0 px-3 py-1.5 border-t border-gray-200 bg-white">
           {error && <p className="text-[10px] text-amber-700">⚠ {error}</p>}
           {activeCurve?.source === 'ai' && activeCurve.points.length > 0 && (
-            <p className="text-[10px] text-green-700">
-              ✓ AI traced <b>{activeCurve.points.length}</b> pts · confidence <b>{(activeCurve.confidence * 100).toFixed(1)}%</b>
-              {lowConfCount > 0 && <span className="text-amber-600"> · {lowConfCount} low-confidence segment{lowConfCount > 1 ? 's' : ''} (add anchors)</span>}
-            </p>
+            <div className="flex flex-col gap-0.5">
+              <p className="text-[10px] text-green-700">
+                ✓ AI traced <b>{activeCurve.points.length}</b> pts · confidence <b>{(activeCurve.confidence * 100).toFixed(1)}%</b>
+                {lowConfCount > 0 && <span className="text-amber-600"> · {lowConfCount} low-confidence segment{lowConfCount > 1 ? 's' : ''} (add anchors)</span>}
+              </p>
+              {activeCurve.segments && activeCurve.segments.length > 0 && activeCurve.segments.filter(s => s.confidence < 0.5).length >= activeCurve.segments.length / 2 && (
+                <p className="text-[11px] font-bold text-red-600 bg-red-50 p-1 rounded border border-red-200">
+                  ⚠ Low confidence — check the anchor marked ⚠ (worst point) and add a click there.
+                </p>
+              )}
+            </div>
           )}
         </div>
       )}

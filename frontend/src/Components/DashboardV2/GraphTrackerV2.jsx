@@ -42,7 +42,7 @@ function ExportModal({ open, onClose, boundaries, onExport, graphLabels, autoDep
             if (b.wrapGroup > maxGroup) maxGroup = b.wrapGroup;
           }
         });
-        
+
         let targetGroup = null;
         for (let g = 1; g <= maxGroup; g++) {
           if (counts[g] === 1) {
@@ -50,11 +50,11 @@ function ExportModal({ open, onClose, boundaries, onExport, graphLabels, autoDep
             break;
           }
         }
-        
+
         if (targetGroup === null) {
           targetGroup = maxGroup + 1;
         }
-        
+
         return prev.map((b, i) => i === idx ? { ...b, wrapGroup: targetGroup } : b);
       }
     });
@@ -82,22 +82,20 @@ function ExportModal({ open, onClose, boundaries, onExport, graphLabels, autoDep
                     <button
                       type="button"
                       onClick={() => setEditedBounds(prev => prev.map((item, i) => i === idx ? { ...item, scaleType: item.scaleType === 'log' ? 'linear' : 'log' } : item))}
-                      className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${
-                        b.scaleType === 'log'
-                          ? "bg-purple-600 hover:bg-purple-700"
-                          : "bg-gray-400 hover:bg-gray-500"
-                      }`}
+                      className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${b.scaleType === 'log'
+                        ? "bg-purple-600 hover:bg-purple-700"
+                        : "bg-gray-400 hover:bg-gray-500"
+                        }`}
                     >
                       {b.scaleType === 'log' ? "Log" : "Linear"}
                     </button>
                     <button
                       type="button"
                       onClick={() => handleToggleWrap(idx)}
-                      className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${
-                        b.wrapGroup > 0
-                          ? "bg-green-500 hover:bg-green-600"
-                          : "bg-red-500 hover:bg-red-600"
-                      }`}
+                      className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${b.wrapGroup > 0
+                        ? "bg-green-500 hover:bg-green-600"
+                        : "bg-red-500 hover:bg-red-600"
+                        }`}
                     >
                       {b.wrapGroup > 0 ? `Wrap${b.wrapGroup}` : "Wrap"}
                     </button>
@@ -263,7 +261,7 @@ function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
     <div className={`fixed inset-0 z-50 flex items-center justify-center transition-all duration-300 ${isMinimized ? 'pointer-events-none' : 'bg-black/45 backdrop-blur-sm'}`}>
       {isMinimized && (
         <div className="fixed bottom-6 right-6 pointer-events-auto">
-          <button 
+          <button
             onClick={() => setIsMinimized(false)}
             className="flex items-center gap-2 px-5 py-3 bg-blue-600 text-white font-bold rounded-full shadow-2xl hover:bg-blue-700 hover:scale-105 transition-all ring-4 ring-blue-600/30"
           >
@@ -272,7 +270,7 @@ function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
           </button>
         </div>
       )}
-      
+
       <div className={`w-[640px] max-w-[92vw] rounded-2xl bg-white shadow-2xl transition-all duration-300 pointer-events-auto ${isMinimized ? 'scale-90 opacity-0 pointer-events-none absolute' : 'scale-100 opacity-100 relative'}`}>
         <div className="border-b border-gray-100 px-6 py-4 flex items-start justify-between">
           <div>
@@ -281,7 +279,7 @@ function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
               Enter the physical values printed at each graph edge. Export will use 0.50 ft depth rows.
             </p>
           </div>
-          <button 
+          <button
             onClick={() => setIsMinimized(true)}
             className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
             title="Minimize"
@@ -304,56 +302,54 @@ function ScaleEntryModal({ open, graphLabels, defaults, onSubmit, onCancel }) {
                         return { ...prev, graphs: newGraphs };
                       });
                     }}
-                    className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${
-                      g.scaleType === 'log'
-                        ? "bg-purple-600 hover:bg-purple-700"
-                        : "bg-gray-400 hover:bg-gray-500"
-                    }`}
+                    className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${g.scaleType === 'log'
+                      ? "bg-purple-600 hover:bg-purple-700"
+                      : "bg-gray-400 hover:bg-gray-500"
+                      }`}
                   >
                     {g.scaleType === 'log' ? "Log" : "Linear"}
                   </button>
                   <button
                     type="button"
-                  onClick={() => {
-                    setFormData(prev => {
-                      const newGraphs = [...prev.graphs];
-                      const currentVal = newGraphs[i].wrapGroup || 0;
-                      if (currentVal > 0) {
-                        newGraphs[i] = { ...newGraphs[i], wrapGroup: 0 };
-                      } else {
-                        const counts = {};
-                        let maxGroup = 0;
-                        newGraphs.forEach((g, idx) => {
-                          if (idx !== i && g.wrapGroup > 0) {
-                            counts[g.wrapGroup] = (counts[g.wrapGroup] || 0) + 1;
-                            if (g.wrapGroup > maxGroup) maxGroup = g.wrapGroup;
+                    onClick={() => {
+                      setFormData(prev => {
+                        const newGraphs = [...prev.graphs];
+                        const currentVal = newGraphs[i].wrapGroup || 0;
+                        if (currentVal > 0) {
+                          newGraphs[i] = { ...newGraphs[i], wrapGroup: 0 };
+                        } else {
+                          const counts = {};
+                          let maxGroup = 0;
+                          newGraphs.forEach((g, idx) => {
+                            if (idx !== i && g.wrapGroup > 0) {
+                              counts[g.wrapGroup] = (counts[g.wrapGroup] || 0) + 1;
+                              if (g.wrapGroup > maxGroup) maxGroup = g.wrapGroup;
+                            }
+                          });
+
+                          let targetGroup = null;
+                          for (let g = 1; g <= maxGroup; g++) {
+                            if (counts[g] === 1) {
+                              targetGroup = g;
+                              break;
+                            }
                           }
-                        });
-                        
-                        let targetGroup = null;
-                        for (let g = 1; g <= maxGroup; g++) {
-                          if (counts[g] === 1) {
-                            targetGroup = g;
-                            break;
+
+                          if (targetGroup === null) {
+                            targetGroup = maxGroup + 1;
                           }
+
+                          newGraphs[i] = { ...newGraphs[i], wrapGroup: targetGroup };
                         }
-                        
-                        if (targetGroup === null) {
-                          targetGroup = maxGroup + 1;
-                        }
-                        
-                        newGraphs[i] = { ...newGraphs[i], wrapGroup: targetGroup };
-                      }
-                      return { ...prev, graphs: newGraphs };
-                    });
-                  }}
-                  className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${
-                    g.wrapGroup > 0
+                        return { ...prev, graphs: newGraphs };
+                      });
+                    }}
+                    className={`px-3 py-1 text-xs font-semibold text-white rounded-lg transition-colors shadow-sm ${g.wrapGroup > 0
                       ? "bg-green-500 hover:bg-green-600"
                       : "bg-red-500 hover:bg-red-600"
-                  }`}
-                >
-                  {g.wrapGroup > 0 ? `Wrap${g.wrapGroup}` : "Wrap"}
+                      }`}
+                  >
+                    {g.wrapGroup > 0 ? `Wrap${g.wrapGroup}` : "Wrap"}
                   </button>
                 </div>
               </div>
@@ -456,7 +452,7 @@ import toast from "react-hot-toast";
 /* ─── Constants ─────────────────────────────────────────────────────────────── */
 const API_URL =
   import.meta.env.VITE_GRAPH_API_URL ||
-  "http://127.0.0.1:8123/segment-and-graph";
+  "/segment-and-graph";
 
 const GRAPH_COLORS = [
   "#EF4444", "#22C55E", "#3B82F6", "#F59E0B",
@@ -468,7 +464,7 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const LAS_API_URL =
   import.meta.env.VITE_GRAPH_LAS ||
   import.meta.env.VITE_GRAPH_Las ||
-  "http://127.0.0.1:8123/generate-las-base64";
+  "/generate-las-base64";
 
 const normBoundary = (b, W, H) => {
   const l = clamp(+b.left || 0, 0, W);
@@ -580,11 +576,11 @@ const valueToPixelLog = (value, vMin, vMax, pxMin, pxMax) => {
 
 const scaledPixelToValue = (px, pxMin, pxMax, vMin, vMax, scaleType) =>
   scaleType === 'log' ? pixelToValueLog(px, pxMin, pxMax, vMin, vMax)
-                      : pixelToValue(px, pxMin, pxMax, vMin, vMax);
+    : pixelToValue(px, pxMin, pxMax, vMin, vMax);
 
 const scaledValueToPixel = (value, vMin, vMax, pxMin, pxMax, scaleType) =>
   scaleType === 'log' ? valueToPixelLog(value, vMin, vMax, pxMin, pxMax)
-                      : valueToPixel(value, vMin, vMax, pxMin, pxMax);
+    : valueToPixel(value, vMin, vMax, pxMin, pxMax);
 
 const applyWrapOffset = (baseValue, wrapLevel, vLeft, vRight, scaleType) => {
   if (!wrapLevel) return baseValue;
@@ -715,6 +711,126 @@ const detectGridDivisions = (imageData, width, height) => {
   };
 };
 
+const detectGridDivisionsManual = (imageData, width, height) => {
+  const data = imageData.data;
+  const DARK_THRESHOLD = 170;
+  const V_GATE = 0.20;              // initial candidate gate for vertical lines
+  const H_GATE = 0.15;              // initial candidate gate for horizontal dashes
+  const V_LINE_MIN_UNION = 0.55;    // vertical line must be dark on >=55% of rows (union)
+  const H_DASH_MIN_UNION = 0.20;    // a dash only spans ~25-40% of box width
+  const MAX_V_GROUP_WIDTH = Math.max(6, Math.round(width * 0.04));  // reject wide curve blobs
+  const MAX_H_GROUP_HEIGHT = Math.max(6, Math.round(height * 0.01)); // dashes/lines are thin
+  const MERGE_GAP = 3;
+
+  // Build boolean dark mask once
+  const dark = new Uint8Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    const p = i * 4;
+    const b = data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114;
+    dark[i] = b < DARK_THRESHOLD ? 1 : 0;
+  }
+
+  const colCov = new Float32Array(width);
+  for (let x = 0; x < width; x++) {
+    let c = 0; for (let y = 0; y < height; y++) c += dark[y * width + x];
+    colCov[x] = c / height;
+  }
+  const rowCov = new Float32Array(height);
+  for (let y = 0; y < height; y++) {
+    let c = 0; for (let x = 0; x < width; x++) c += dark[y * width + x];
+    rowCov[y] = c / width;
+  }
+
+  const mergeGroups = (positions) => {
+    if (!positions.length) return [];
+    const groups = [[positions[0]]];
+    for (let i = 1; i < positions.length; i++) {
+      if (positions[i] - positions[i - 1] <= MERGE_GAP) groups[groups.length - 1].push(positions[i]);
+      else groups.push([positions[i]]);
+    }
+    return groups;
+  };
+
+  // UNION coverage: fraction of rows (or cols) where ANY member of the group is dark
+  const unionCoverageV = (group) => {
+    let hit = 0;
+    for (let y = 0; y < height; y++) {
+      for (const x of group) { if (dark[y * width + x]) { hit++; break; } }
+    }
+    return hit / height;
+  };
+  const unionCoverageH = (group) => {
+    let hit = 0;
+    for (let x = 0; x < width; x++) {
+      for (const y of group) { if (dark[y * width + x]) { hit++; break; } }
+    }
+    return hit / width;
+  };
+
+  const vCand = []; for (let x = 0; x < width; x++)  if (colCov[x] > V_GATE) vCand.push(x);
+  const hCand = []; for (let y = 0; y < height; y++) if (rowCov[y] > H_GATE) hCand.push(y);
+
+  const vLinePositions = [];
+  const vGroups = mergeGroups(vCand);
+  for (const g of vGroups) {
+    const groupWidth = g[g.length - 1] - g[0] + 1;
+    if (groupWidth <= MAX_V_GROUP_WIDTH) {
+      if (unionCoverageV(g) >= V_LINE_MIN_UNION) {
+        vLinePositions.push(Math.round((g[0] + g[g.length - 1]) / 2));
+      }
+    } else {
+      const localMaxima = [];
+      for (let idx = 0; idx < g.length; idx++) {
+        const x = g[idx];
+        const prevVal = x > 0 ? colCov[x - 1] : 0;
+        const nextVal = x < width - 1 ? colCov[x + 1] : 0;
+        const val = colCov[x];
+        if (val >= prevVal && val >= nextVal && val >= V_LINE_MIN_UNION) {
+          localMaxima.push(x);
+        }
+      }
+      const mergedMaxima = [];
+      for (const x of localMaxima) {
+        if (mergedMaxima.length === 0) {
+          mergedMaxima.push(x);
+        } else {
+          const lastX = mergedMaxima[mergedMaxima.length - 1];
+          if (x - lastX < MAX_V_GROUP_WIDTH) {
+            if (colCov[x] > colCov[lastX]) {
+              mergedMaxima[mergedMaxima.length - 1] = x;
+            }
+          } else {
+            mergedMaxima.push(x);
+          }
+        }
+      }
+      for (const x of mergedMaxima) {
+        const windowGroup = [];
+        for (let wx = x - 2; wx <= x + 2; wx++) {
+          if (wx >= 0 && wx < width) {
+            windowGroup.push(wx);
+          }
+        }
+        if (unionCoverageV(windowGroup) >= V_LINE_MIN_UNION) {
+          vLinePositions.push(x);
+        }
+      }
+    }
+  }
+
+  const hLinePositions = mergeGroups(hCand)
+    .filter(g => (g[g.length - 1] - g[0] + 1) <= MAX_H_GROUP_HEIGHT)
+    .filter(g => unionCoverageH(g) >= H_DASH_MIN_UNION)
+    .map(g => Math.round((g[0] + g[g.length - 1]) / 2));
+
+  return {
+    hDivisions: Math.max(1, hLinePositions.length > 1 ? hLinePositions.length - 1 : 1),
+    vDivisions: Math.max(1, vLinePositions.length > 1 ? vLinePositions.length - 1 : 1),
+    hLinePositions,
+    vLinePositions,
+  };
+};
+
 const curvePointToValues = (point, croppedRegion, xScale, depthScaleObj) => {
   const sourcePoint = Array.isArray(point) ? { x: Number(point[0]), y: Number(point[1]), wrapLevel: Number(point[2] || 0) } : point;
   const localX = Number(sourcePoint.x) - Number(croppedRegion.bounds.left);
@@ -751,7 +867,7 @@ const resampleCurveGeneral = (rawPoints, croppedRegion, xScaleObj, depthScaleObj
         currentPoints = [];
       }
       currentLap = wl;
-      
+
       const sourcePoint = Array.isArray(pt) ? { x: Number(pt[0]), y: Number(pt[1]) } : pt;
       currentPoints.push([Number(sourcePoint.x), Number(sourcePoint.y)]);
     }
@@ -760,19 +876,19 @@ const resampleCurveGeneral = (rawPoints, croppedRegion, xScaleObj, depthScaleObj
     pieces.push({ lap: currentLap, points: currentPoints });
   }
 
-  const scale = { 
-    pxLeft: Number(croppedRegion.bounds.left), 
-    pxRight: Number(croppedRegion.bounds.right), 
-    valueLeft: Number(xScaleObj.minVal), 
+  const scale = {
+    pxLeft: Number(croppedRegion.bounds.left),
+    pxRight: Number(croppedRegion.bounds.right),
+    valueLeft: Number(xScaleObj.minVal),
     valueRight: Number(xScaleObj.maxVal),
     type: xScaleObj.scaleType
   };
-  const depth = { 
-    pxTop: Number(croppedRegion.bounds.top), 
-    pxBottom: Number(croppedRegion.bounds.bottom), 
-    depthTop: Number(depthScaleObj.top), 
-    depthBottom: Number(depthScaleObj.bottom), 
-    step: Number(step) 
+  const depth = {
+    pxTop: Number(croppedRegion.bounds.top),
+    pxBottom: Number(croppedRegion.bounds.bottom),
+    depthTop: Number(depthScaleObj.top),
+    depthBottom: Number(depthScaleObj.bottom),
+    step: Number(step)
   };
 
   return resampleWrappedCurve(pieces, scale, depth);
@@ -1360,7 +1476,7 @@ function HeaderOcrModal({ open, text, accuracy, onTextChange, onClose, onSave })
   );
 }
 
-function SettingsModal({ onClose }) {
+function SettingsModal({ onClose, curveThickness, setCurveThickness, lasMode, setLasMode }) {
   const [numGraphs, setNumGraphs] = useState("2");
   const [threshold, setThreshold] = useState("0.5");
   const [minDist, setMinDist] = useState("10");
@@ -1384,6 +1500,23 @@ function SettingsModal({ onClose }) {
           </button>
         </div>
         <div className="px-6 py-5 space-y-6">
+          {/* LAS Conversion */}
+          <div>
+            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">LAS Conversion</h3>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { key: "auto", title: "Auto", desc: "Detect tracks & scales automatically" },
+                { key: "manual", title: "Manual", desc: "You mark each column/row and its method" },
+              ].map(opt => (
+                <button key={opt.key} onClick={() => setLasMode(opt.key)}
+                  className={`text-left p-3 rounded-xl border transition-colors ${lasMode === opt.key ? "border-blue-500 bg-blue-50" : "border-gray-200 hover:bg-gray-50"}`}>
+                  <p className="text-sm font-semibold text-gray-800">{opt.title}</p>
+                  <p className="text-[11px] text-gray-500 mt-0.5">{opt.desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Detection Settings */}
           <div>
             <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Detection Settings</h3>
@@ -1406,6 +1539,13 @@ function SettingsModal({ onClose }) {
                 <div className="flex gap-3 items-center">
                   <input type="range" min="1" max="50" value={minDist} onChange={e => setMinDist(e.target.value)} className="flex-1 accent-blue-600" />
                   <span className="text-sm font-semibold text-gray-700 w-10 text-right">{minDist} px</span>
+                </div>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-gray-700 block mb-1.5">Curve Thickness <span className="font-normal text-gray-400">(px)</span></label>
+                <div className="flex gap-3 items-center">
+                  <input type="range" min="0.5" max="5.0" step="0.5" value={curveThickness} onChange={e => setCurveThickness(parseFloat(e.target.value))} className="flex-1 accent-blue-600" />
+                  <span className="text-sm font-semibold text-gray-700 w-10 text-right">{curveThickness} px</span>
                 </div>
               </div>
             </div>
@@ -1584,6 +1724,13 @@ export default function GraphTrackerV2() {
   const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
   const uploadInputRef = useRef(null);
   const [threshold, setThreshold] = useState("0.5");
+  const [curveThickness, setCurveThickness] = useState(1.5);
+  const [isPdf, setIsPdf] = useState(false);
+  const [processMode, setProcessMode] = useState("detect");
+  const [showModeMenu, setShowModeMenu] = useState(false);
+  const [pdfImages, setPdfImages] = useState([]);
+  const [pdfToken, setPdfToken] = useState(null);
+  const [isExtracting, setIsExtracting] = useState(false);
 
   /* ── Graph Data ── */
   const [sourceGraphLines, setSourceGraphLinesRaw] = useState([]);
@@ -1615,6 +1762,9 @@ export default function GraphTrackerV2() {
       }
       if (!event.target.closest(".user-menu-wrapper")) {
         setShowUserMenu(false);
+      }
+      if (!event.target.closest(".mode-menu-wrapper")) {
+        setShowModeMenu(false);
       }
     };
     document.addEventListener("mousedown", handleOutsideClick);
@@ -1698,6 +1848,102 @@ export default function GraphTrackerV2() {
   const [showDebugOverlay, setShowDebugOverlay] = useState(false);
   const [showScaleModal, setShowScaleModal] = useState(false);
   const [appliedGraphBoundaries, setAppliedGraphBoundaries] = useState([]);
+
+  // --- Manual LAS Conversion State ---
+  const [lasMode, setLasMode] = useState("auto"); // "auto" | "manual"
+  const [manualSelections, setManualSelections] = useState([]);
+  const MANUAL_GRID_COUNT_MODE = "lines";
+  const [manualGridInfo, setManualGridInfo] = useState({ rows: 0, cols: 0, perBox: {} });
+  const [activeSelectionId, setActiveSelectionId] = useState(null);
+
+  const handleAddLasRegion = (type, opts = {}) => {
+    const W = imageDimensions.width || 800;
+    const H = imageDimensions.height || 1000;
+    let bounds;
+    // For a column, span 20% of width in the center. For a row, span 20% of height in the center.
+    if (type === "column") {
+      bounds = { left: Math.round(W * 0.4), right: Math.round(W * 0.6), top: 20, bottom: H - 20 };
+    } else {
+      bounds = { left: 20, right: W - 20, top: Math.round(H * 0.4), bottom: Math.round(H * 0.6) };
+    }
+    const newId = opts.id || Date.now().toString();
+    setManualSelections(prev => [...prev, {
+      id: newId,
+      bounds: opts.bounds || bounds,
+      type: type,
+      style: "solid",
+      label: opts.label || (type === "column" ? `TRACK_${prev.length + 1}` : `ROW_${prev.length + 1}`),
+      depthTop: opts.depthTop ?? 0,
+      depthBottom: opts.depthBottom ?? 0,
+      xLeftVal: opts.xLeftVal ?? 0,
+      xRightVal: opts.xRightVal ?? 100,
+      scale: opts.scale || "linear",
+      tracedPoints: opts.tracedPoints || [],
+    }]);
+    setActiveSelectionId(newId);
+    toast.success(`LAS ${type} region added.`);
+  };
+
+  const computeManualGrid = async () => {
+    const rowBoxes = manualSelections.filter(s => s.type === "row");
+    const colBoxes = manualSelections.filter(s => s.type === "column");
+    if (!imageUrl || (!rowBoxes.length && !colBoxes.length)) {
+      setManualGridInfo({ rows: 0, cols: 0, perBox: {} });
+      return;
+    }
+    try {
+      const all = [...rowBoxes, ...colBoxes];
+      const PAD = Math.max(4, Math.round(Math.min(imageDimensions.width,
+        imageDimensions.height) * 0.005));
+      const padded = all.map(s => ({
+        left: Math.max(0, s.bounds.left - PAD),
+        top: Math.max(0, s.bounds.top - PAD),
+        right: Math.min(imageDimensions.width, s.bounds.right + PAD),
+        bottom: Math.min(imageDimensions.height, s.bounds.bottom + PAD),
+      }));
+      const crops = await cropGraphRegions(padded);
+      const perBox = {};
+      let rows = 0, cols = 0;
+      all.forEach((sel, i) => {
+        const crop = crops[i];
+        if (!crop || !crop.imageData) return;
+        // TUNING NOTE: If counts are too HIGH (noise/curve strokes counted as lines), raise
+        // lineCoverage toward 0.4 or lower darkThreshold toward 150. If too LOW, do the opposite.
+        const g = detectGridDivisionsManual(crop.imageData, crop.width, crop.height);
+        console.log("[manualGrid]", sel.type, "v:", g.vLinePositions.length,
+          "h:", g.hLinePositions.length, "vLinePositions:", g.vLinePositions, "box:", sel.bounds);
+        // In this project's convention:
+        // ROW box counts VERTICAL lines
+        // COLUMN box counts HORIZONTAL dashes
+        const verticalLineCount = MANUAL_GRID_COUNT_MODE === "lines"
+          ? (g.vLinePositions?.length || 0)
+          : Math.max(0, (g.vLinePositions?.length || 0) - 1);
+        const horizontalLineCount = MANUAL_GRID_COUNT_MODE === "lines"
+          ? (g.hLinePositions?.length || 0)
+          : Math.max(0, (g.hLinePositions?.length || 0) - 1);
+
+        perBox[sel.id] = sel.type === "row"
+          ? { count: verticalLineCount, axis: "vertical" }
+          : { count: horizontalLineCount, axis: "horizontal" };
+
+        if (sel.type === "row") rows += verticalLineCount;
+        if (sel.type === "column") cols += horizontalLineCount;
+      });
+      setManualGridInfo({ rows, cols, perBox });
+    } catch (e) {
+      console.error("Manual grid detection failed:", e);
+    }
+  };
+
+  useEffect(() => {
+    if (lasMode !== "manual") return;
+    let cancelled = false;
+    (async () => { if (!cancelled) await computeManualGrid(); })();
+    return () => { cancelled = true; };
+  }, [lasMode, imageUrl, JSON.stringify(manualSelections.map(s => ({ id: s.id, type: s.type, b: s.bounds })))]);
+
+  const [lasRegionDrag, setLasRegionDrag] = useState(null); // { selId, edge }
+  const [hoveredEdge, setHoveredEdge] = useState(null); // { selId, edge }
   const [croppedGraphRegions, setCroppedGraphRegions] = useState([]);
   const [axisScales, setAxisScales] = useState([]);
   const [curveNames, setCurveNames] = useState([]);
@@ -1722,6 +1968,7 @@ export default function GraphTrackerV2() {
   const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 });
   const [boundaryDrag, setBoundaryDrag] = useState({ graphIdx: null, edge: null });
   const [selectionDrag, setSelectionDrag] = useState(null);
+  const [showManualGridBoxes, setShowManualGridBoxes] = useState(true);
   const [activeBoundaryIdx, setActiveBoundaryIdx] = useState(0);
   const BDGE_TOL = 8;
 
@@ -1812,7 +2059,7 @@ export default function GraphTrackerV2() {
         if (visibleGraphMap[idx] === false || !line?.length) return;
         const col = curveColors[idx] || GRAPH_COLORS[idx % GRAPH_COLORS.length];
         ctx.strokeStyle = col;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = curveThickness;
 
         // Break-aware rendering: lift pen at explicit null markers only
         if (line.length > 1) {
@@ -1854,15 +2101,17 @@ export default function GraphTrackerV2() {
       });
 
       // Draw boundaries
-      graphBoundaryView.forEach((b, idx) => {
-        if (visibleGraphMap[idx] === false || !b) return;
-        const col = curveColors[idx] || GRAPH_COLORS[idx % GRAPH_COLORS.length];
-        ctx.strokeStyle = col;
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([5, 4]);
-        ctx.strokeRect(b.left * zoom, b.top * zoom, (b.right - b.left) * zoom, (b.bottom - b.top) * zoom);
-        ctx.setLineDash([]);
-      });
+      if (lasMode !== "manual") {
+        graphBoundaryView.forEach((b, idx) => {
+          if (visibleGraphMap[idx] === false || !b) return;
+          const col = curveColors[idx] || GRAPH_COLORS[idx % GRAPH_COLORS.length];
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([5, 4]);
+          ctx.strokeRect(b.left * zoom, b.top * zoom, (b.right - b.left) * zoom, (b.bottom - b.top) * zoom);
+          ctx.setLineDash([]);
+        });
+      }
 
       if (showDebugOverlay) {
         sourceGraphLines.forEach((line, idx) => {
@@ -1906,6 +2155,89 @@ export default function GraphTrackerV2() {
         ctx.setLineDash([]);
       }
 
+
+      // Draw manual selections
+      manualSelections.forEach(sel => {
+        if (!showManualGridBoxes && sel.type !== "column") return;
+
+        const b = sel.bounds;
+
+        if (!showManualGridBoxes) {
+          const idx = curveIds.indexOf(sel.id);
+          const col = idx !== -1 ? (curveColors[idx] || GRAPH_COLORS[idx % GRAPH_COLORS.length]) : "#10B981";
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([5, 4]);
+          ctx.strokeRect(b.left * zoom, b.top * zoom, (b.right - b.left) * zoom, (b.bottom - b.top) * zoom);
+          ctx.setLineDash([]);
+          return;
+        }
+
+        const isActive = sel.id === activeSelectionId;
+
+        ctx.strokeStyle = isActive ? "#2563EB" : "#10B981"; // blue-600 if active, green-500 if not
+        ctx.fillStyle = isActive ? "rgba(37, 99, 235, 0.08)" : "rgba(16, 185, 129, 0.06)";
+        ctx.lineWidth = isActive ? 3 : 2;
+        ctx.setLineDash(isActive ? [8, 4] : [6, 4]);
+        ctx.fillRect(b.left * zoom, b.top * zoom, (b.right - b.left) * zoom, (b.bottom - b.top) * zoom);
+        ctx.strokeRect(b.left * zoom, b.top * zoom, (b.right - b.left) * zoom, (b.bottom - b.top) * zoom);
+        ctx.setLineDash([]);
+
+        // Label
+        ctx.fillStyle = isActive ? "#2563EB" : "#10B981";
+        ctx.fillRect(b.left * zoom, (b.top * zoom) - 20, 150, 20);
+        ctx.fillStyle = "white";
+        ctx.font = "12px sans-serif";
+        ctx.fillText(`${sel.label} (${sel.type})`, (b.left * zoom) + 4, (b.top * zoom) - 6);
+
+        // Draw handles if active
+        if (isActive) {
+          const handleRadius = 5;
+          ctx.fillStyle = "#2563EB";
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.lineWidth = 1.5;
+
+          // Centers of edges
+          const midX = (b.left + b.right) / 2 * zoom;
+          const midY = (b.top + b.bottom) / 2 * zoom;
+
+          const handles = [
+            [b.left * zoom, midY],   // Left
+            [b.right * zoom, midY],  // Right
+            [midX, b.top * zoom],    // Top
+            [midX, b.bottom * zoom]  // Bottom
+          ];
+
+          handles.forEach(([hx, hy]) => {
+            ctx.beginPath();
+            ctx.arc(hx, hy, handleRadius, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+          });
+        }
+
+        // Draw trace if exists
+        if (sel.tracedPoints && sel.tracedPoints.length > 0) {
+          ctx.beginPath();
+          let started = false;
+          sel.tracedPoints.forEach((pt) => {
+            if (pt) {
+              if (!started) {
+                ctx.moveTo(pt[0] * zoom, pt[1] * zoom);
+                started = true;
+              } else {
+                ctx.lineTo(pt[0] * zoom, pt[1] * zoom);
+              }
+            } else {
+              started = false; // break marker
+            }
+          });
+          ctx.strokeStyle = "#FBBF24"; // yellow trace
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      });
+
       // Track seed points
       if (trackPoints.length > 0) {
         trackPoints.forEach(([x, y]) => {
@@ -1919,7 +2251,7 @@ export default function GraphTrackerV2() {
         });
       }
     };
-  }, [imageUrl, imageDimensions, zoom, sourceGraphLines, visibleGraphMap, graphBoundaryView, trackPoints, selectionDrag, manualGraphCrop, showDebugOverlay, graphScales, croppedGraphRegions, axisScales, depthScale]);
+  }, [imageUrl, imageDimensions, zoom, sourceGraphLines, visibleGraphMap, graphBoundaryView, trackPoints, selectionDrag, manualGraphCrop, showDebugOverlay, graphScales, croppedGraphRegions, axisScales, depthScale, manualSelections, showManualGridBoxes]);
 
   /* ══════════════════════════════════════════════ KEYBOARD ══════════════════════════════════════════ */
   // Push initial state to history on first load
@@ -1951,13 +2283,59 @@ export default function GraphTrackerV2() {
   const handleFileUpload = async (file) => {
     if (!file) return;
     const ext = file.name.split(".").pop().toLowerCase();
-    if (!["tif", "tiff", "png", "jpg", "jpeg"].includes(ext)) { toast.error("Please upload a supported image file (.tif, .png, .jpg)."); return; }
-    
+    if (!["tif", "tiff", "png", "jpg", "jpeg", "pdf"].includes(ext)) { toast.error("Please upload a supported image file (.tif, .png, .jpg, .pdf)."); return; }
+
     setUploadedFile(file);
+    setPdfImages([]);
+    setPdfToken(null);
+    setProcessMode("detect");
+
+    setImageDimensions({ width: 0, height: 0 });
+    setImageUrl(null);
+    setHeaderImageUrl(null);
+    setLayoutInfo(null);
+    setLasHeaders(null);
+    setHeaderOcrText("");
+    setHeaderOcrInfo(null);
+    setEditableHeaderText("");
+    setSavedHeaderText("");
+    setActiveViewTab("graph");
+    setRightPanelTab("header");
+    setSourceGraphLines([]);
+    setGraphBoundaries([]);
+    setGraphScales([]);
+    setAppliedGraphBoundaries([]);
+    setCroppedGraphRegions([]);
+    setAxisScales([]);
+    setCurveNames([]);
+    setCurveColors([]);
+    setCurveIds([]);
+    setDepthScale(null);
+    setGridInfo([]);
+    setShowScaleModal(false);
+    setManualGraphCrop(null);
+    setVisibleGraphMap({});
+    setHistory([]);
+    setHistoryIdx(-1);
+    historyIdxRef.current = -1;
+    sourceGraphLinesRef.current = [];
+    graphBoundariesRef.current = [];
+    pushHistory([], []);
+    setTrackingGraph(null);
+    setHoveredPlot(null);
+    setSelectedPlot(null);
+    setTrackPoints([]);
+
+    if (ext === "pdf") {
+      setIsPdf(true);
+      return;
+    }
+    setIsPdf(false);
+
     toast.loading("Processing image for display...", { id: "upload" });
 
     let displayUrl = URL.createObjectURL(file);
-    
+
     if (ext === "tif" || ext === "tiff") {
       try {
         const form = new FormData();
@@ -1968,10 +2346,10 @@ export default function GraphTrackerV2() {
           const blob = await res.blob();
           displayUrl = URL.createObjectURL(blob);
         } else {
-          console.warn("Failed to convert TIFF via backend.");
+          console.warn("Failed to convert file via backend.");
         }
       } catch (err) {
-        console.warn("Error converting TIFF", err);
+        console.warn("Error converting file", err);
       }
     }
 
@@ -1979,50 +2357,72 @@ export default function GraphTrackerV2() {
     img.onload = () => {
       setImageDimensions({ width: img.width, height: img.height });
       setImageUrl(displayUrl);
-      setHeaderImageUrl(null);
-      setLayoutInfo(null);
-      setLasHeaders(null);
-      setHeaderOcrText("");
-      setHeaderOcrInfo(null);
-      setEditableHeaderText("");
-      setSavedHeaderText("");
-      setActiveViewTab("graph");
-      setRightPanelTab("header");
-      setSourceGraphLines([]);
-      setGraphBoundaries([]);
-      setGraphScales([]);
-      setAppliedGraphBoundaries([]);
-      setCroppedGraphRegions([]);
-      setAxisScales([]);
-      setCurveNames([]);
-      setCurveColors([]);
-      setCurveIds([]);
-      setDepthScale(null);
-      setGridInfo([]);
-      setShowScaleModal(false);
-      setManualGraphCrop(null);
-      setVisibleGraphMap({});
-      setHistory([]);
-      setHistoryIdx(-1);
-      historyIdxRef.current = -1;
-      sourceGraphLinesRef.current = [];
-      graphBoundariesRef.current = [];
-      pushHistory([], []);
-      setTrackingGraph(null);
-      setHoveredPlot(null);
-      setSelectedPlot(null);
-      setTrackPoints([]);
       toast.success("File uploaded.", { id: "upload" });
     };
     img.onerror = () => {
       toast.error("Failed to render image.", { id: "upload" });
     };
-    img.src = displayUrl; 
+    img.src = displayUrl;
   };
 
   /* ══════════════════════════════════════════════ AI DETECTION ══════════════════════════════════════ */
+  const handlePdfSummarize = async () => {
+    if (!uploadedFile) { toast.error("Please upload a PDF file first."); return; }
+    if (!isPdf) { toast.error("PDF Summarize needs a PDF file."); return; }
+    setIsExtracting(true);
+    try {
+      const form = new FormData();
+      form.append("file", uploadedFile);
+      form.append("min_width", "200");
+      form.append("min_height", "150");
+      form.append("render_pages", "false");
+      const PDF_IMAGES_URL = (import.meta.env.VITE_PDF_IMAGES_URL) || API_URL.replace("/segment-and-graph", "/extract-pdf-images");
+      const res = await fetch(PDF_IMAGES_URL, { method: "POST", body: form });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setPdfToken(data.token);
+      setPdfImages(data.images || []);
+      setRightPanelTab("images");
+      setShowRightMenu(true);
+      setActiveViewTab("graph");
+      toast.success(`Found ${data.count} images. Select one to load it.`);
+    } catch (e) {
+      toast.error("Image extraction failed: " + e.message);
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
+  const handleSelectPdfImage = async (imgObj) => {
+    try {
+      toast.loading(`Loading page ${imgObj.page} image...`, { id: "pdf-image-load" });
+      const PDF_BASE = API_URL.replace("/segment-and-graph", "");
+      const url = `${PDF_BASE}/pdf-image/${pdfToken}/${imgObj.id}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const file = new File([blob], `pdf_p${imgObj.page}_${imgObj.id}.png`, { type: "image/png" });
+      setIsPdf(false);
+      setUploadedFile(file);
+      const objUrl = URL.createObjectURL(blob);
+      const el = new Image();
+      el.onload = () => {
+        setImageDimensions({ width: el.width, height: el.height });
+        setImageUrl(objUrl);
+        setActiveViewTab("graph");
+        toast.success(`Loaded image from page ${imgObj.page}. Now click Submit & Start to detect curves.`, { id: "pdf-image-load" });
+      };
+      el.onerror = () => {
+        toast.error("Failed to render the fetched PDF image.", { id: "pdf-image-load" });
+      }
+      el.src = objUrl;
+    } catch (e) {
+      toast.error("Could not load image: " + e.message, { id: "pdf-image-load" });
+    }
+  };
+
   const handleRunAI = async () => {
-    if (!uploadedFile) { toast.error("Please upload a TIFF file first."); return; }
+    if (!uploadedFile) { toast.error("Please upload a TIFF or PDF file first."); return; }
     if (!numGraphsInput || +numGraphsInput < 1) { toast.error("Enter number of curves (≥1)."); return; }
 
     setIsAnalyzing(true);
@@ -2160,6 +2560,113 @@ export default function GraphTrackerV2() {
     return nearest;
   }, [sourceGraphLines, visibleGraphMap, graphBoundaryView, graphScales, zoom]);
 
+  const updateManualSelection = (id, field, value) => {
+    setManualSelections(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      if (field === "left" || field === "right" || field === "top" || field === "bottom") {
+        const bounds = normBoundary({ ...s.bounds, [field]: parseFloat(value) || 0 }, imageDimensions.width, imageDimensions.height);
+        return { ...s, bounds };
+      }
+      return { ...s, [field]: value };
+    }));
+  };
+
+  const deleteManualSelection = (id) => {
+    const sel = manualSelections.find(s => s.id === id);
+    if (sel && sel.isTraced) {
+      const lineIdx = curveIds.indexOf(id);
+      if (lineIdx !== -1) {
+        setSourceGraphLines(prev => prev.filter((_, idx) => idx !== lineIdx));
+        setCurveNames(prev => prev.filter((_, idx) => idx !== lineIdx));
+        setCurveColors(prev => prev.filter((_, idx) => idx !== lineIdx));
+        setCurveIds(prev => prev.filter((_, idx) => idx !== lineIdx));
+        setGraphBoundaries(prev => prev.filter((_, idx) => idx !== lineIdx));
+      }
+    }
+    setManualSelections(prev => prev.filter(s => s.id !== id));
+    if (activeSelectionId === id) setActiveSelectionId(null);
+  };
+
+  const handleTraceManualColumn = async (selId) => {
+    const sel = manualSelections.find(s => s.id === selId);
+    if (!sel || !uploadedFile) return;
+
+    setIsAnalyzing(true);
+    try {
+      const form = new FormData();
+      form.append("file", uploadedFile);
+      form.append("threshold", threshold);
+      form.append("total_graphs", "1");
+      form.append("include_header_ocr", "false");
+      form.append("include_depth_ocr", "false");
+      form.append("skip_curves", "false");
+
+      const manualBox = {
+        x1: sel.bounds.left,
+        y1: sel.bounds.top,
+        x2: sel.bounds.right,
+        y2: sel.bounds.bottom
+      };
+      form.append("manual_graph_box", JSON.stringify(manualBox));
+
+      const res = await fetch(API_URL, { method: "POST", body: form });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const data = await res.json();
+      const lines = Object.values(data.graph_points || {}).map(l => l.map(([x, y]) => [x + sel.bounds.left, y + sel.bounds.top]));
+
+      if (lines.length > 0) {
+        const existingIdx = curveIds.indexOf(sel.id);
+        if (existingIdx !== -1) {
+          setSourceGraphLines(prev => prev.map((line, idx) => idx === existingIdx ? lines[0] : line));
+          setCurveNames(prev => prev.map((name, idx) => idx === existingIdx ? sel.label : name));
+          setGraphBoundaries(prev => prev.map((bounds, idx) => idx === existingIdx ? sel.bounds : bounds));
+
+          setManualSelections(prev =>
+            prev.map(s => s.id === selId ? { ...s, isTraced: true, lineIdx: existingIdx } : s)
+          );
+        } else {
+          const lineIdx = sourceGraphLines.length;
+          setSourceGraphLines(prev => [...prev, lines[0]]);
+
+          setCurveNames(prev => {
+            const next = [...prev];
+            next[lineIdx] = sel.label;
+            return next;
+          });
+          setCurveColors(prev => {
+            const next = [...prev];
+            next[lineIdx] = GRAPH_COLORS[lineIdx % GRAPH_COLORS.length];
+            return next;
+          });
+          setCurveIds(prev => {
+            const next = [...prev];
+            next[lineIdx] = sel.id;
+            return next;
+          });
+          setGraphBoundaries(prev => {
+            const next = [...prev];
+            next[lineIdx] = sel.bounds;
+            return next;
+          });
+
+          setManualSelections(prev =>
+            prev.map(s => s.id === selId ? { ...s, isTraced: true, lineIdx } : s)
+          );
+        }
+
+        toast.success(`Successfully traced curve for ${sel.label}!`);
+      } else {
+        toast.error("No curves detected in the selected column box.");
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error(`Trace failed: ${err.message}`);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
   const onMouseDown = (e) => {
     if (e.button !== 0) return;
     const { x, y } = canvasCoords(e);
@@ -2182,7 +2689,52 @@ export default function GraphTrackerV2() {
       setSelectedPlot(null);
     }
 
-    if (mode === "bounds") {
+    if (lasMode === "manual" && !smartCursorView && mode === "pan" && activeViewTab !== "guided") {
+      const edgeTol = BDGE_TOL / zoom;
+      for (const s of manualSelections) {
+        const b = s.bounds;
+        const nearY = y >= b.top - edgeTol && y <= b.bottom + edgeTol;
+        const nearX = x >= b.left - edgeTol && x <= b.right + edgeTol;
+        if (nearY && Math.abs(x - b.left) <= edgeTol) {
+          e.stopPropagation();
+          setLasRegionDrag({ selId: s.id, edge: "left" });
+          setActiveSelectionId(s.id);
+          return;
+        }
+        if (nearY && Math.abs(x - b.right) <= edgeTol) {
+          e.stopPropagation();
+          setLasRegionDrag({ selId: s.id, edge: "right" });
+          setActiveSelectionId(s.id);
+          return;
+        }
+        if (nearX && Math.abs(y - b.top) <= edgeTol) {
+          e.stopPropagation();
+          setLasRegionDrag({ selId: s.id, edge: "top" });
+          setActiveSelectionId(s.id);
+          return;
+        }
+        if (nearX && Math.abs(y - b.bottom) <= edgeTol) {
+          e.stopPropagation();
+          setLasRegionDrag({ selId: s.id, edge: "bottom" });
+          setActiveSelectionId(s.id);
+          return;
+        }
+      }
+
+      const hit = manualSelections.find(s =>
+        x >= s.bounds.left && x <= s.bounds.right && y >= s.bounds.top && y <= s.bounds.bottom
+      );
+      if (hit) {
+        e.stopPropagation();
+        setActiveSelectionId(hit.id);
+        return;
+      } else {
+        setActiveSelectionId(null);
+      }
+    }
+
+    if ((mode === "bounds" || mode === "draw_column" || mode === "draw_row") && activeViewTab !== "guided") {
+      e.stopPropagation();
       setSelectionDrag({ x0: x, y0: y, x1: x, y1: y });
       return;
     }
@@ -2274,7 +2826,52 @@ export default function GraphTrackerV2() {
     setCursorPos({ x: Math.round(x), y: Math.round(y) });
 
     if (selectionDrag) {
+      e.stopPropagation();
       setSelectionDrag(prev => prev ? { ...prev, x1: x, y1: y } : prev);
+      return;
+    }
+
+    if (lasRegionDrag) {
+      e.stopPropagation();
+      const { selId, edge } = lasRegionDrag;
+      setManualSelections(prev => prev.map(s => {
+        if (s.id !== selId) return s;
+        const upd = { ...s.bounds };
+        upd[edge] = edge === "left" || edge === "right" ? x : y;
+        return {
+          ...s,
+          bounds: normBoundary(upd, imageDimensions.width, imageDimensions.height)
+        };
+      }));
+    }
+
+    if (lasMode === "manual" && !smartCursorView && mode === "pan" && !lasRegionDrag) {
+      const edgeTol = BDGE_TOL / zoom;
+      let foundHover = null;
+      for (const s of manualSelections) {
+        const b = s.bounds;
+        const nearY = y >= b.top - edgeTol && y <= b.bottom + edgeTol;
+        const nearX = x >= b.left - edgeTol && x <= b.right + edgeTol;
+        if (nearY && Math.abs(x - b.left) <= edgeTol) {
+          foundHover = { selId: s.id, edge: "left" };
+          break;
+        }
+        if (nearY && Math.abs(x - b.right) <= edgeTol) {
+          foundHover = { selId: s.id, edge: "right" };
+          break;
+        }
+        if (nearX && Math.abs(y - b.top) <= edgeTol) {
+          foundHover = { selId: s.id, edge: "top" };
+          break;
+        }
+        if (nearX && Math.abs(y - b.bottom) <= edgeTol) {
+          foundHover = { selId: s.id, edge: "bottom" };
+          break;
+        }
+      }
+      setHoveredEdge(foundHover);
+    } else if (hoveredEdge) {
+      setHoveredEdge(null);
     }
 
     if (!smartCursorView) {
@@ -2312,14 +2909,38 @@ export default function GraphTrackerV2() {
     }
   };
 
-  const onMouseUp = () => {
+  const onMouseUp = (e) => {
     if (selectionDrag) {
+      if (e) e.stopPropagation();
       const selected = normBoundary(
         { left: selectionDrag.x0, right: selectionDrag.x1, top: selectionDrag.y0, bottom: selectionDrag.y1 },
         imageDimensions.width,
         imageDimensions.height
       );
       if ((selected.right - selected.left) > 10 && (selected.bottom - selected.top) > 10) {
+        if ((lasMode === "manual" || activeViewTab === "guided") && (mode === "draw_column" || mode === "draw_row")) {
+          const type = mode === "draw_column" ? "column" : "row";
+          const newSel = {
+            id: Math.random().toString(36).substring(2, 9),
+            type,
+            bounds: selected,
+            label: type === "column" ? `Curve ${manualSelections.filter(s => s.type === "column").length + 1}` : `Row ${manualSelections.filter(s => s.type === "row").length + 1}`,
+            xLeftVal: 0,
+            xRightVal: 100,
+            scale: "linear",
+            style: "solid",
+            depthTop: 0,
+            depthBottom: 1000,
+            isTraced: false,
+          };
+          setManualSelections(prev => [...prev, newSel]);
+          setActiveSelectionId(newSel.id);
+          setMode("pan");
+          toast.success(`Added manual ${type} region.`);
+          setSelectionDrag(null);
+          return;
+        }
+
         if (sourceGraphLines.length) {
           const idx = clamp(activeBoundaryIdx, 0, sourceGraphLines.length - 1);
           setGraphBoundaries(prev => {
@@ -2355,6 +2976,10 @@ export default function GraphTrackerV2() {
       }
       boundaryDraftRef.current = null;
       setBoundaryDrag({ graphIdx: null, edge: null });
+    }
+    if (lasRegionDrag) {
+      if (e) e.stopPropagation();
+      setLasRegionDrag(null);
     }
     setIsPanning(false);
   };
@@ -2480,7 +3105,170 @@ export default function GraphTrackerV2() {
     return new Blob([byteArray], { type: mimeType });
   };
 
-  const exportAs = () => {
+  const exportAs = async () => {
+    if (lasMode === "manual") {
+      const graph_info = {};
+      let globalDepthTop = 0;
+      let globalDepthBottom = 1000;
+
+      const manualColCount = manualSelections.filter(s => s.type === "column").length;
+      const manualRowCount = manualSelections.filter(s => s.type === "row").length;
+
+      if (manualRowCount === 0) {
+        toast.error("Draw at least one ROW (depth) box");
+        return;
+      }
+      if (manualColCount === 0) {
+        toast.error("Draw at least one COLUMN box");
+        return;
+      }
+
+      if (manualGridInfo.rows < 1) {
+        toast.error("No rows detected in the ROW box — draw the box around the depth grid lines");
+        return;
+      }
+      if (manualGridInfo.cols < 1) {
+        toast.error("No columns detected in the COLUMN box — draw the box around the grid lines");
+        return;
+      }
+
+      const rowSel = manualSelections.find(s => s.type === "row");
+      if (rowSel) {
+        globalDepthTop = parseFloat(rowSel.depthTop);
+        globalDepthBottom = parseFloat(rowSel.depthBottom);
+        if (isNaN(globalDepthTop)) globalDepthTop = 0;
+        if (isNaN(globalDepthBottom)) globalDepthBottom = 0;
+      }
+
+      if (globalDepthTop === globalDepthBottom) {
+        toast.error("Set Top/Bottom depth on the ROW box");
+        return;
+      }
+
+      const untraced = [];
+      const invalidRanges = [];
+      const columnSels = manualSelections.filter(s => s.type === "column");
+      for (let i = 0; i < columnSels.length; i++) {
+        const s = columnSels[i];
+        const trackLabel = s.label || `TRACK_${i + 1}`;
+        // Find curve points: try curveIds lookup first, then fall back to isTraced + lineIdx
+        let lineIdx = curveIds.indexOf(s.id);
+        if (lineIdx === -1 && s.isTraced && s.lineIdx != null && s.lineIdx >= 0) {
+          lineIdx = s.lineIdx;
+        }
+        console.log("[export] column check:", trackLabel, "s.id:", s.id, "curveIds:", curveIds,
+          "isTraced:", s.isTraced, "s.lineIdx:", s.lineIdx, "resolved lineIdx:", lineIdx,
+          "sourceGraphLines.length:", sourceGraphLines.length);
+        let rawPts = (lineIdx !== -1 && sourceGraphLines[lineIdx]?.length) ? sourceGraphLines[lineIdx] : (s.tracedPoints || []);
+        let pts = (rawPts || []).filter(Boolean);
+
+        // Auto-trace fallback if points are missing
+        if (!pts.length && uploadedFile) {
+          try {
+            const newPts = await handleTraceManualColumn(s.id);
+            if (newPts && newPts.length > 0) {
+              pts = newPts;
+            }
+          } catch (e) {
+            console.error("Auto-trace fallback failed:", e);
+          }
+        }
+
+        if (!pts.length) {
+          untraced.push(trackLabel);
+          continue;
+        }
+
+        // Build synthetic croppedRegion from the column box (x) and row box (y)
+        const colBounds = s.bounds;
+        const croppedRegion = {
+          bounds: {
+            left: colBounds.left,
+            right: colBounds.right,
+            top: rowSel.bounds.top,
+            bottom: rowSel.bounds.bottom
+          },
+          width: colBounds.right - colBounds.left,
+          height: rowSel.bounds.bottom - rowSel.bounds.top,
+        };
+
+        const leftVal = parseFloat(s.xLeftVal);
+        const rightVal = parseFloat(s.xRightVal);
+        if (!Number.isFinite(leftVal) || !Number.isFinite(rightVal) || leftVal === rightVal) {
+          invalidRanges.push(`Set Left/Right values for ${s.label || `TRACK_${i + 1}`}`);
+        }
+
+        graph_info[s.label || `TRACK_${i + 1}`] = {
+          pixel_bounds: [s.bounds.left, s.bounds.top, s.bounds.right, s.bounds.bottom],
+          x_range: [leftVal, rightVal],
+          y_range: [globalDepthTop, globalDepthBottom],
+          scale: s.scale || "linear",
+          lines: { [s.label || `TRACK_${i + 1}`]: pts },
+        };
+      }
+
+      if (untraced.length) {
+        toast.error(`Could not detect curves in: ${untraced.join(", ")}. Adjust the column box over the curve.`);
+        return;
+      }
+
+      if (invalidRanges.length) {
+        invalidRanges.forEach(msg => toast.error(msg));
+        return;
+      }
+
+      if (Object.keys(graph_info).length === 0) {
+        toast.error("No column regions defined for manual export.");
+        return;
+      }
+
+      setIsAnalyzing(true);
+      try {
+        const wellName = (uploadedFile?.name || "export").replace(/\.[^/.]+$/, "").replace(/[\s/\\:*?"<>|]/g, "_");
+        const payload = {
+          graph_info,
+          grid_rows: manualGridInfo.rows,
+          grid_cols: manualGridInfo.cols,
+          las_file_header: lasHeaders || {},
+          curve_metadata: {},
+          depth_unit: "FT",
+          depth_step: 0.5,
+          header_ocr_text: completeHeaderText || formatLasHeadersAsText(lasHeaders) || ""
+        };
+
+        const res = await fetch(LAS_API_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+          let detail = "";
+          try { detail = (await res.json())?.detail || ""; } catch { }
+          toast.error(`Failed to generate manual LAS${detail ? `: ${detail}` : ""} (HTTP ${res.status})`);
+          return;
+        }
+        const data = await res.json();
+        const lasBase64 = data.las_file_base64 || data.las_base64;
+        if (lasBase64) {
+          const binary = atob(lasBase64);
+          const array = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
+          triggerSaveAs(new Blob([array], { type: "text/plain;charset=utf-8" }), `${wellName}_manual.las`);
+          toast.success("Manual LAS file exported successfully.");
+        } else {
+          toast.error("Export returned no data.");
+        }
+      } catch (e) {
+        toast.error("Manual Export failed: " + e.message);
+      } finally {
+        setIsAnalyzing(false);
+      }
+      return;
+    }
+
     if (!sourceGraphLines.length) {
       toast.error("No data to export.");
       return;
@@ -2733,7 +3521,7 @@ export default function GraphTrackerV2() {
       }
 
       const curveName = String(row.curveName || gLabel(idx)).trim() || gLabel(idx);
-      
+
       sampledCurves.push({
         baseName: curveName.split('_')[0],
         userLap: isNaN(parseInt(curveName.includes('_') ? curveName.split('_').pop() : "0", 10)) ? 0 : parseInt(curveName.includes('_') ? curveName.split('_').pop() : "0", 10),
@@ -2752,22 +3540,22 @@ export default function GraphTrackerV2() {
 
     sampledCurves.forEach((curve) => {
       const { baseName, userLap, filteredLine, filteredWrapLevels } = curve;
-      
+
       let currentLap = filteredWrapLevels ? filteredWrapLevels[0] ?? userLap : userLap;
       let currentPoints = [];
       for (let i = 0; i < filteredLine.length; i++) {
         if (filteredLine[i] === null) {
           if (currentPoints.length > 0) {
-             if (!baseCurvePiecesMap[baseName]) baseCurvePiecesMap[baseName] = [];
-             baseCurvePiecesMap[baseName].push({ lap: currentLap, points: currentPoints });
-             currentPoints = [];
+            if (!baseCurvePiecesMap[baseName]) baseCurvePiecesMap[baseName] = [];
+            baseCurvePiecesMap[baseName].push({ lap: currentLap, points: currentPoints });
+            currentPoints = [];
           }
         } else {
           const lap = filteredWrapLevels ? filteredWrapLevels[i] : userLap;
           if (currentPoints.length > 0 && currentLap !== lap) {
-             if (!baseCurvePiecesMap[baseName]) baseCurvePiecesMap[baseName] = [];
-             baseCurvePiecesMap[baseName].push({ lap: currentLap, points: currentPoints });
-             currentPoints = [];
+            if (!baseCurvePiecesMap[baseName]) baseCurvePiecesMap[baseName] = [];
+            baseCurvePiecesMap[baseName].push({ lap: currentLap, points: currentPoints });
+            currentPoints = [];
           }
           currentLap = lap;
           currentPoints.push(filteredLine[i]);
@@ -2780,12 +3568,12 @@ export default function GraphTrackerV2() {
 
       if (!baseCurvePropsMap[baseName]) {
         baseCurvePropsMap[baseName] = {
-           name: baseName,
-           unit: curve.unit,
-           description: curve.description,
-           scale: curve.scale,
-           depth: { pxTop: curve.depth.pxTop, pxBottom: curve.depth.pxBottom, depthTop: curve.depth.depthTop, depthBottom: curve.depth.bottomDepth, step: curve.depth.step },
-           wrapGroup: curve.wrapGroup || 0
+          name: baseName,
+          unit: curve.unit,
+          description: curve.description,
+          scale: curve.scale,
+          depth: { pxTop: curve.depth.pxTop, pxBottom: curve.depth.pxBottom, depthTop: curve.depth.depthTop, depthBottom: curve.depth.bottomDepth, step: curve.depth.step },
+          wrapGroup: curve.wrapGroup || 0
         };
       }
     });
@@ -2796,13 +3584,13 @@ export default function GraphTrackerV2() {
       const props = baseCurvePropsMap[baseName];
       const data = resampleWrappedCurve(pieces, props.scale, props.depth);
       if (data.length) {
-         resampledCurves.push({
-           name: props.name,
-           unit: props.unit,
-           description: props.description,
-           data,
-           wrapGroup: props.wrapGroup || 0
-         });
+        resampledCurves.push({
+          name: props.name,
+          unit: props.unit,
+          description: props.description,
+          data,
+          wrapGroup: props.wrapGroup || 0
+        });
       }
     });
 
@@ -2899,10 +3687,27 @@ export default function GraphTrackerV2() {
   const activePlotScale = activePlot ? graphScales[activePlot.graphIdx] : null;
   const activePlotBoundary = activePlot ? graphBoundaryView[activePlot.graphIdx] : null;
 
+  let cursorStyle = "default";
+  if (lasRegionDrag) {
+    cursorStyle = (lasRegionDrag.edge === "left" || lasRegionDrag.edge === "right") ? "ew-resize" : "ns-resize";
+  } else if (hoveredEdge) {
+    cursorStyle = (hoveredEdge.edge === "left" || hoveredEdge.edge === "right") ? "ew-resize" : "ns-resize";
+  } else if (mode === "pan") {
+    cursorStyle = isPanning ? "grabbing" : "grab";
+  } else if (mode === "insert" || mode === "bounds" || mode === "draw_column" || mode === "draw_row") {
+    cursorStyle = "crosshair";
+  }
+
   return (
     <div className="flex flex-col h-screen w-screen bg-white overflow-hidden select-none font-sans text-gray-800">
       {/* MODALS */}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && <SettingsModal
+        onClose={() => setShowSettings(false)}
+        curveThickness={curveThickness}
+        setCurveThickness={setCurveThickness}
+        lasMode={lasMode}
+        setLasMode={setLasMode}
+      />}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
       {showWorkflowInstructions && <WorkflowInstructionsModal onClose={() => setShowWorkflowInstructions(false)} />}
       <HeaderOcrModal
@@ -3065,6 +3870,34 @@ export default function GraphTrackerV2() {
             <span>📐</span>Select Bounds
           </button>
 
+          {lasMode === "manual" && (
+            <>
+              <button onClick={() => { setMode("draw_column"); setShowManualGridBoxes(true); }}
+                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === "draw_column"
+                  ? "bg-amber-50 border-amber-300 text-amber-700"
+                  : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
+                  }`}>
+                <span>✏️</span>Add Column
+              </button>
+              <button onClick={() => { setMode("draw_row"); setShowManualGridBoxes(true); }}
+                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all ${mode === "draw_row"
+                  ? "bg-amber-50 border-amber-300 text-amber-700"
+                  : "bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
+                  }`}>
+                <span>✏️</span>Add Row
+              </button>
+              <button onClick={() => {
+                setMode("pan");
+                computeManualGrid();
+                setShowManualGridBoxes(false);
+              }}
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-all bg-green-50 border-green-300 text-green-700 hover:bg-green-100">
+                <span>✅</span>LAS Done
+              </button>
+            </>
+          )}
+
+
           <button
             onClick={() => {
               setSmartCursorView(prev => {
@@ -3140,7 +3973,7 @@ export default function GraphTrackerV2() {
             {/* FILE UPLOAD */}
             <div className="px-4 pt-4 pb-3 border-b border-gray-100">
               <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">File</p>
-              <input id="graph-tracker-file-upload" ref={uploadInputRef} type="file" className="hidden" accept=".tif,.tiff" onChange={e => { if (e.target.files[0]) { handleFileUpload(e.target.files[0]); e.target.value = null; } }} />
+              <input id="graph-tracker-file-upload" ref={uploadInputRef} type="file" className="hidden" accept=".tif,.tiff,.pdf" onChange={e => { if (e.target.files[0]) { handleFileUpload(e.target.files[0]); e.target.value = null; } }} />
               {!uploadedFile ? (
                 <label htmlFor="graph-tracker-file-upload"
                   className="border-2 border-dashed border-blue-200 rounded-lg p-4 flex flex-col items-center cursor-pointer hover:bg-blue-50 transition-colors"
@@ -3173,12 +4006,54 @@ export default function GraphTrackerV2() {
                     Manual graph crop selected: Y {Math.round(manualGraphCrop.top)} to {Math.round(manualGraphCrop.bottom)}
                   </div>
                 )}
-                <button onClick={handleRunAI} disabled={!uploadedFile || isAnalyzing}
-                  className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-50">
-                  <svg className={`w-3.5 h-3.5 ${isAnalyzing ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                  {isAnalyzing ? "Starting…" : "Submit & Start"}
-                </button>
-                <p className="text-[10px] text-gray-400">Submit to start the automatic curve detection process.</p>
+                <div className="relative mode-menu-wrapper w-full">
+                  <div className="flex w-full">
+                    <button
+                      onClick={processMode === "pdf_summarize" ? handlePdfSummarize : handleRunAI}
+                      disabled={!uploadedFile || isAnalyzing || isExtracting}
+                      className="flex-grow flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-l-md bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-50">
+                      {(isAnalyzing || isExtracting) ? (
+                        <svg className="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                      ) : (
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                      )}
+                      {processMode === "pdf_summarize"
+                        ? (isExtracting ? "Extracting..." : "PDF Summarize")
+                        : (isAnalyzing ? "Starting..." : "Submit & Start")}
+                    </button>
+                    <button
+                      onClick={() => setShowModeMenu(!showModeMenu)}
+                      disabled={!uploadedFile || isAnalyzing || isExtracting}
+                      className="px-2 py-2 bg-blue-700 text-white rounded-r-md border-l border-blue-800 hover:bg-blue-800 disabled:opacity-50 transition-colors flex items-center justify-center"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                    </button>
+                  </div>
+
+                  {showModeMenu && (
+                    <div className="absolute top-full mt-1 w-full bg-white border border-gray-200 rounded-md shadow-lg z-10 py-1">
+                      <button
+                        onClick={() => { setProcessMode("detect"); setShowModeMenu(false); }}
+                        className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 text-gray-800 font-medium"
+                      >
+                        Submit & Start <span className="text-[10px] text-gray-400 block font-normal mt-0.5">Detect curves with OCR</span>
+                      </button>
+                      {isPdf && (
+                        <button
+                          onClick={() => { setProcessMode("pdf_summarize"); setShowModeMenu(false); }}
+                          className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 text-gray-800 font-medium border-t border-gray-100"
+                        >
+                          PDF Summarize <span className="text-[10px] text-gray-400 block font-normal mt-0.5">Extract images without OCR</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <p className="text-[10px] text-gray-400">
+                  {processMode === "pdf_summarize"
+                    ? "Extract all images from the PDF — no OCR is performed."
+                    : "Submit to start the automatic curve detection process."}
+                </p>
               </div>
             </div>
 
@@ -3241,7 +4116,7 @@ export default function GraphTrackerV2() {
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
           onMouseLeave={handleCanvasLeave}
-          style={{ cursor: mode === "pan" ? (isPanning ? "grabbing" : "grab") : mode === "insert" ? "crosshair" : "default" }}>
+          style={{ cursor: cursorStyle }}>
           {imageUrl ? (
             <>
               {/* Header OCR View */}
@@ -3263,8 +4138,23 @@ export default function GraphTrackerV2() {
                   setZoom={setZoom}
                   panOffset={panOffset}
                   setPanOffset={setPanOffset}
+                  curveThickness={curveThickness}
+                  imageDimensions={imageDimensions}
+                  lasMode={lasMode}
+                  setLasMode={setLasMode}
+                  manualSelections={manualSelections}
+                  setManualSelections={setManualSelections}
+                  manualGridInfo={manualGridInfo}
+                  activeSelectionId={activeSelectionId}
+                  setActiveSelectionId={setActiveSelectionId}
+                  onAddLasRegion={handleAddLasRegion}
+                  onManualGridRecompute={computeManualGrid}
                   onSave={(updatedCurves) => {
+                    if (lasMode === "manual") {
+                      setShowManualGridBoxes(true);
+                    }
                     setActiveViewTab("graph");
+                    setMode("pan");
                     if (!updatedCurves || updatedCurves.length === 0) return;
                     // For each curve traced, we add it to sourceGraphLines
                     const newLines = [...sourceGraphLines];
@@ -3346,7 +4236,68 @@ export default function GraphTrackerV2() {
                     });
 
                     pushHistory(newLines, newBounds);
-                    setActiveViewTab("graph");
+
+                    pushHistory(newLines, newBounds);
+
+                    // --- AUTO-BUILD MANUAL LAS GRID FROM GUIDED CURVES ---
+                    // Only do this if they are actively working in manual mode
+                    if (lasMode === "manual") {
+                      const W = imageDimensions.width, H = imageDimensions.height;
+                      const dTop = depthScale?.top ?? 0;
+                      const dBot = depthScale?.bottom ?? 1000;
+
+                      setManualSelections(prevSel => {
+                        const next = [...prevSel];
+
+                        updatedCurves.forEach((curveObj, i) => {
+                          const idx = newIds.indexOf(curveObj.id);
+                          const pts = idx !== -1 ? newLines[idx] : (curveObj.points || []);
+                          const realPts = (pts || []).filter(Boolean);
+                          if (!realPts.length) return;
+
+                          const cb = (newBounds[idx]) || lineBounds(realPts, W, H);
+                          const sc = idx !== -1 && idx < newLines.length ?
+                            (idx < graphScales.length ? graphScales[idx] : { minValue: 0, maxValue: 100, scaleType: "linear" }) : {};
+
+                          const colBox = {
+                            id: curveObj.id,
+                            bounds: { ...cb },
+                            type: "column",
+                            style: "solid",
+                            label: curveObj.name || `TRACK_${i + 1}`,
+                            depthTop: dTop,
+                            depthBottom: dBot,
+                            xLeftVal: sc.minValue ?? 0,
+                            xRightVal: sc.maxValue ?? 100,
+                            scale: sc.scaleType || "linear",
+                            tracedPoints: realPts,
+                          };
+                          const exist = next.findIndex(s => s.id === curveObj.id);
+                          if (exist !== -1) next[exist] = colBox; else next.push(colBox);
+                        });
+
+                        // one shared ROW (depth) box spanning all column boxes
+                        const cols = next.filter(s => s.type === "column");
+                        if (cols.length) {
+                          const left = Math.min(...cols.map(s => s.bounds.left));
+                          const right = Math.max(...cols.map(s => s.bounds.right));
+                          const top = Math.min(...cols.map(s => s.bounds.top));
+                          const bottom = Math.max(...cols.map(s => s.bounds.bottom));
+                          const rowBox = {
+                            id: "AUTO_ROW", type: "row", style: "solid", label: "DEPTH",
+                            bounds: { left, right, top, bottom },
+                            depthTop: dTop, depthBottom: dBot, xLeftVal: 0, xRightVal: 100,
+                            scale: "linear", tracedPoints: [],
+                          };
+                          const rIdx = next.findIndex(s => s.type === "row");
+                          if (rIdx !== -1) next[rIdx] = rowBox; else next.push(rowBox);
+                        }
+                        return next;
+                      });
+
+                      // recompute rows x cols after state applies
+                      setTimeout(() => { computeManualGrid(); }, 0);
+                    }
                   }}
                   onCurveTracked={(curves) => {
                     console.log("Human-guided curves tracked:", curves);
@@ -3365,6 +4316,129 @@ export default function GraphTrackerV2() {
               <p className="text-sm font-medium">Upload a TIFF file to get started</p>
               <p className="text-xs mt-1 text-gray-300">Supports .tif and .tiff formats</p>
             </div>
+          )}
+
+          {/* Manual Selection Popover */}
+          {activeSelectionId && (
+            (() => {
+              const sel = manualSelections.find(s => s.id === activeSelectionId);
+              if (!sel) return null;
+              // we don't have panOffset/zoom easily available outside of canvas, 
+              // wait, we can just render this as a fixed overlay or absolute overlay based on panOffset if we need it to stick to the box.
+              // For simplicity, let's just make it a floating panel at the top right of the canvas container, or just a fixed panel.
+              return (
+                <div className="absolute top-4 right-4 z-20 w-72 rounded-xl border border-gray-200 bg-white p-4 shadow-2xl">
+                  <div className="flex items-center justify-between mb-4">
+                    <h4 className="text-sm font-bold text-gray-900">
+                      Region Settings
+                      {manualGridInfo.perBox[sel.id] !== undefined && (
+                        <span className="text-[10px] text-gray-500 font-normal ml-1">
+                          ({sel.type === "column"
+                            ? `${manualGridInfo.perBox[sel.id].v} cols`
+                            : `${manualGridInfo.perBox[sel.id].h} rows`} detected)
+                        </span>
+                      )}
+                    </h4>
+                    <button onClick={() => setActiveSelectionId(null)} className="text-gray-400 hover:text-gray-700">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Type</label>
+                      <select
+                        value={sel.type}
+                        onChange={e => setManualSelections(prev => prev.map(s => s.id === sel.id ? { ...s, type: e.target.value } : s))}
+                        className="w-full rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-blue-400">
+                        <option value="column">Column</option>
+                        <option value="row">Row (Depth)</option>
+                      </select>
+                    </div>
+
+                    {sel.type === "column" && (
+                      <>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Curve Style</label>
+                          <select
+                            value={sel.style}
+                            onChange={e => setManualSelections(prev => prev.map(s => s.id === sel.id ? { ...s, style: e.target.value } : s))}
+                            className="w-full rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-blue-400">
+                            <option value="solid">Solid</option>
+                            <option value="dashed">Dashed</option>
+                            <option value="dotted">Dotted</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Label (Mnemonic)</label>
+                          <input type="text" value={sel.label}
+                            onChange={e => setManualSelections(prev => prev.map(s => s.id === sel.id ? { ...s, label: e.target.value } : s))}
+                            className="w-full rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-blue-400" />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">Left Value</label>
+                            <input type="number" value={sel.xLeftVal}
+                              onChange={e => setManualSelections(prev => prev.map(s => s.id === sel.id ? { ...s, xLeftVal: Number(e.target.value) } : s))}
+                              className="w-full rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-blue-400" />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">Right Value</label>
+                            <input type="number" value={sel.xRightVal}
+                              onChange={e => setManualSelections(prev => prev.map(s => s.id === sel.id ? { ...s, xRightVal: Number(e.target.value) } : s))}
+                              className="w-full rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-blue-400" />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Scale</label>
+                          <select
+                            value={sel.scale}
+                            onChange={e => setManualSelections(prev => prev.map(s => s.id === sel.id ? { ...s, scale: e.target.value } : s))}
+                            className="w-full rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-blue-400">
+                            <option value="linear">Linear</option>
+                            <option value="log">Logarithmic</option>
+                          </select>
+                        </div>
+
+                        <div className="pt-2">
+                          <button
+                            onClick={() => handleTraceManualColumn(sel.id)}
+                            className="w-full rounded bg-blue-600 py-1.5 text-xs font-bold text-white hover:bg-blue-700">
+                            Trace Column
+                          </button>
+                        </div>
+                      </>
+                    )}
+
+                    {sel.type === "row" && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Top Depth</label>
+                          <input type="number" value={sel.depthTop}
+                            onChange={e => setManualSelections(prev => prev.map(s => s.id === sel.id ? { ...s, depthTop: Number(e.target.value) } : s))}
+                            className="w-full rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-blue-400" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Bottom Depth</label>
+                          <input type="number" value={sel.depthBottom}
+                            onChange={e => setManualSelections(prev => prev.map(s => s.id === sel.id ? { ...s, depthBottom: Number(e.target.value) } : s))}
+                            className="w-full rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-blue-400" />
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="pt-2 border-t border-gray-100">
+                      <button
+                        onClick={() => deleteManualSelection(sel.id)}
+                        className="w-full rounded border border-red-200 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50">
+                        Delete Region
+                      </button>
+                    </div>
+
+                  </div>
+                </div>
+              );
+            })()
           )}
 
           {/* Hover curve card */}
@@ -3455,10 +4529,11 @@ export default function GraphTrackerV2() {
                 <span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded-full">{sourceGraphLines.length} graphs</span>
               </div>
 
-              <div className="grid grid-cols-2 gap-1.5 mb-3">
+              <div className="grid grid-cols-3 gap-1.5 mb-3">
                 {[
                   { key: "header", label: "Header" },
                   { key: "graphs", label: "Graphs" },
+                  { key: "images", label: "PDF Images" },
                 ].map(tab => (
                   <button key={tab.key} onClick={() => setRightPanelTab(tab.key)}
                     className={`px-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide transition-colors ${rightPanelTab === tab.key ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}`}>
@@ -3467,7 +4542,33 @@ export default function GraphTrackerV2() {
                 ))}
               </div>
 
-              {rightPanelTab === "header" ? (
+              {rightPanelTab === "images" ? (
+                <div className="space-y-2">
+                  {pdfImages.length === 0 ? (
+                    <p className="text-[10px] text-gray-400 italic">
+                      Run "PDF Summarize" to extract images from the PDF.
+                    </p>
+                  ) : (
+                    pdfImages.map((img) => (
+                      <button
+                        key={img.id}
+                        onClick={() => handleSelectPdfImage(img)}
+                        className="w-full flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 p-2 text-left hover:border-blue-400 hover:bg-blue-50 transition-colors"
+                      >
+                        <img src={img.thumb} alt={`page ${img.page}`}
+                          className="h-14 w-14 rounded object-contain bg-white border border-gray-100 shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold text-gray-800">Page {img.page}</p>
+                          <p className="text-[10px] text-gray-400">
+                            {img.width}×{img.height} · {img.source === "page" ? "rendered" : "embedded"}
+                          </p>
+                        </div>
+                        <span className="text-[10px] font-bold text-blue-600 shrink-0">Use →</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              ) : rightPanelTab === "header" ? (
                 <div className="space-y-3">
                   <div className="rounded-lg border border-gray-200 bg-gray-50 p-2">
                     {headerImageUrl ? (
@@ -3620,7 +4721,12 @@ export default function GraphTrackerV2() {
                       How to use Apply Boundaries
                     </button>
                     <div className="rounded-md bg-gray-50 px-2.5 py-2 text-[10px] font-medium text-gray-500">
-                      {depthScale ? (
+                      {lasMode === "manual" ? (
+                        <div className="space-y-1">
+                          <div className="font-bold text-green-700">Manual Mode Active. Export step: 0.50 ft</div>
+                          <div>Manual grid: {manualGridInfo.rows} rows x {manualGridInfo.cols} cols</div>
+                        </div>
+                      ) : depthScale ? (
                         <div className="space-y-1">
                           <div className="font-bold text-green-700">Scale applied. Export step: 0.50 ft</div>
                           {gridInfo.slice(0, 2).map((grid, idx) => (
@@ -3641,15 +4747,24 @@ export default function GraphTrackerV2() {
             {/* EXPORT */}
             <div className="px-4 pt-3 pb-4">
               <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">LAS Export</p>
-              <button onClick={exportAs}
-                disabled={!appliedGraphBoundaries.length || !axisScales.length || !depthScale}
-                className={`w-full flex items-center justify-center gap-2 py-2 px-3 border rounded-lg transition-colors text-xs font-semibold ${appliedGraphBoundaries.length && axisScales.length && depthScale
-                  ? "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
-                  : "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
-                  }`}>
-                <span className="text-base">📦</span>
-                Export LAS
-              </button>
+              {(() => {
+                const manualColCount = manualSelections.filter(s => s.type === "column").length;
+                const manualRowCount = manualSelections.filter(s => s.type === "row").length;
+                const isAutoExportReady = appliedGraphBoundaries.length && axisScales.length && depthScale;
+                const isManualExportReady = manualColCount >= 1 && manualRowCount >= 1;
+                const isExportReady = lasMode === "manual" ? isManualExportReady : isAutoExportReady;
+                return (
+                  <button onClick={exportAs}
+                    disabled={!isExportReady}
+                    className={`w-full flex items-center justify-center gap-2 py-2 px-3 border rounded-lg transition-colors text-xs font-semibold ${isExportReady
+                      ? "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
+                      : "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                      }`}>
+                    <span className="text-base">📦</span>
+                    Export LAS
+                  </button>
+                );
+              })()}
               <div className="download-header-wrapper relative mt-2">
                 <button
                   type="button"

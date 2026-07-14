@@ -42,8 +42,7 @@ services:
       TIFF_CHUNK_MODEL_PATH: best.pt
       USE_UNET_PIPELINE: "false"
     volumes:
-      - ./python-multiline/best.pt:/app/best.pt
-      - ./python-multiline/models:/app/models
+      - ./python-multiline:/app
 
   frontend:
     build:

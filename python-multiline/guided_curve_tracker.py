@@ -77,6 +77,7 @@ def _sample_curve_appearance(
     lab: np.ndarray,
     anchors: List[Tuple[int, int]],
     sample_radius: int = 9, # FIX 1: Use smaller default sample_radius (9, not 25)
+    exclude_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Learn what the target curve looks like (median LAB color) from small
@@ -102,6 +103,11 @@ def _sample_curve_appearance(
         bg = np.median(inkness)               # window background level
         margin = max(30.0, 0.35 * (inkness.max() - bg))
         mask = inkness > bg + margin
+        
+        if exclude_mask is not None:
+            ex = exclude_mask[y0:y1, x0:x1].reshape(-1)
+            mask &= ~ex
+            
         if not mask.any():
             continue
         # Get absolute distances to the click point for each pixel in patch
@@ -112,10 +118,8 @@ def _sample_curve_appearance(
         masked_dists = patch_spatial_dist[mask_indices]
         masked_inkness = inkness[mask_indices]
         
-        # Sort by distance first, then by -inkness for tie-break toward higher inkness
-        sort_keys = [(masked_dists[i], -masked_inkness[i], mask_indices[i]) for i in range(len(mask_indices))]
-        sort_keys.sort()
-        best_idx = sort_keys[0][2]
+        score = masked_dists - 0.05 * masked_inkness   # prefer near AND strongly inked
+        best_idx = mask_indices[int(np.argmin(score))]
         
         reps.append(patch[best_idx]) # FIX 1: Pick the ONE representative pixel closest to click
 
@@ -210,6 +214,32 @@ def _estimate_curve_style(bgr: np.ndarray, curve_lab: np.ndarray, anchors: List[
         return "dashed", med_gap
 
 
+def _detect_grid(bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    H, W = gray.shape
+    vgrid = np.zeros((H, W), dtype=bool)
+    hgrid = np.zeros((H, W), dtype=bool)
+    
+    all_ink = cv2.adaptiveThreshold(
+        gray, 1, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 31, 10
+    ).astype(np.uint8)
+
+    col_density = all_ink.sum(axis=0) / float(H)
+    grid_cols = np.where(col_density > 0.85)[0]
+    vgrid[:, grid_cols] = True
+
+    row_density = all_ink.sum(axis=1) / float(W)
+    grid_rows = np.where(row_density > 0.85)[0]
+    hgrid[grid_rows, :] = True
+
+    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(300, H // 2)))
+    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (max(300, W // 2), 1))
+    vgrid |= cv2.morphologyEx(all_ink, cv2.MORPH_OPEN, vk) > 0
+    hgrid |= cv2.morphologyEx(all_ink, cv2.MORPH_OPEN, hk) > 0
+
+    return vgrid, hgrid
+
+
 def _build_cost_map(
     bgr: np.ndarray,
     curve_lab: np.ndarray,
@@ -217,7 +247,9 @@ def _build_cost_map(
     suppress_gridlines: bool = True,
     est_gap_px: float = 15.0,
     is_dotted: bool = False,
-) -> np.ndarray:
+    vgrid: Optional[np.ndarray] = None,
+    hgrid: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Build a pixel-wise cost map for pathfinding.
     Cost is high for background/grid and low for pixels matching curve_lab.
@@ -250,6 +282,9 @@ def _build_cost_map(
     solid_mask = None
     non_dot_mask = None
     dot_mask = None
+    
+    if vgrid is None or hgrid is None:
+        vgrid, hgrid = _detect_grid(bgr)
 
     if is_dashed:
         if is_dotted:
@@ -288,37 +323,14 @@ def _build_cost_map(
                     solid_mask[labels == i] = True
         
     if suppress_gridlines:
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        H, W = gray.shape
-        dark = (gray < 160).astype(np.uint8)
-        
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        sat = hsv[:, :, 1]
-        colored_ink = (sat > 40).astype(np.uint8)
-        all_ink = np.bitwise_or(dark, colored_ink)
-
-        # --- VERTICAL gridlines: columns that are dark ink across most of the height ---
-        col_density = dark.sum(axis=0) / float(H)
-        grid_cols = np.where(col_density > 0.55)[0]
-        vgrid = np.zeros((H, W), dtype=bool)
-        vgrid[:, grid_cols] = True
-
-        # --- HORIZONTAL gridlines: rows that are ink across most of the width ---
-        row_density = all_ink.sum(axis=1) / float(W)
-        grid_rows = np.where(row_density > 0.55)[0]
-        hgrid = np.zeros((H, W), dtype=bool)
-        hgrid[grid_rows, :] = True
-
-        # Safety net for broken/short gridlines: long thin straight runs only.
-        vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(151, H // 6)))
-        hk = cv2.getStructuringElement(cv2.MORPH_RECT, (max(151, W // 6), 1))
-        vgrid |= cv2.morphologyEx(dark * 255, cv2.MORPH_OPEN, vk) > 0
-        hgrid |= cv2.morphologyEx(all_ink * 255, cv2.MORPH_OPEN, hk) > 0
-
         grid = vgrid | hgrid
+        
+        # Dilate grid mask to account for line thickness and anti-aliasing
+        grid_dilated = cv2.dilate(grid.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))) > 0
 
-        # Unconditionally penalize grid lines so they are strictly avoided
-        cost = np.where(grid, np.minimum(cost + 0.8, 1.0), cost)
+        # Penalise the gridline, but never erase curve pixels that happen to sit on it.
+        on_curve = cost < 0.40
+        cost = np.where(grid_dilated & ~on_curve, np.maximum(cost, 1.00), cost)
 
     # 2. Apply pre-detected solid/dotted masks or solid curve smoothing
     if is_dashed:
@@ -337,45 +349,30 @@ def _build_cost_map(
         closed_mask = cv2.morphologyEx(curve_mask, cv2.MORPH_CLOSE, kernel_v)
         cost = np.where((closed_mask == 1) & (cost > 0.35), 0.35, cost)
 
-    return cost.astype(np.float32)
+    return cost.astype(np.float32), vgrid, hgrid
 
 
 # --------------------------------------------------------------------------- #
 #  Anchored optimal path (dynamic programming, one X per row)
 # --------------------------------------------------------------------------- #
 
-def _snap_anchor(cost: np.ndarray, x: int, y: int, radius: int = 15) -> Tuple[int, int]:
-    """Snap a user click to the lowest-cost pixel within the nearest connected ink component."""
+def _snap_anchor_cost(cost: np.ndarray, x: int, y: int, radius: int = 8,
+                      spatial_weight: float = 0.02) -> Tuple[int, int]:
+    """Snap a click to the nearest pixel that MATCHES the learned curve appearance."""
     h, w = cost.shape
     x0, x1 = max(0, x - radius), min(w, x + radius + 1)
     y0, y1 = max(0, y - radius), min(h, y + radius + 1)
-    win = cost[y0:y1, x0:x1].copy()
-    
-    ink = (win < 0.45).astype(np.uint8)
-    num, labels, stats, centroids = cv2.connectedComponentsWithStats(ink, connectivity=8)
-    
-    click_y, click_x = y - y0, x - x0
-    target_label = labels[click_y, click_x] if click_y < win.shape[0] and click_x < win.shape[1] else 0
-    
-    if target_label == 0 and num > 1:
-        min_dist = float('inf')
-        for i in range(1, num):
-            ys, xs = np.where(labels == i)
-            if len(ys) > 0:
-                dists = (ys - click_y)**2 + (xs - click_x)**2
-                min_d = np.min(dists)
-                if min_d < min_dist:
-                    min_dist = min_d
-                    target_label = i
-                    
-    if target_label > 0:
-        win[labels != target_label] = 1.0
-
+    win = cost[y0:y1, x0:x1]
+    if win.size == 0:
+        return x, y
     yy, xx = np.mgrid[y0:y1, x0:x1]
-    d2 = ((xx - x) ** 2 + (yy - y) ** 2).astype(np.float32)
-    score = win + 0.0004 * d2
-    idx = np.unravel_index(np.argmin(score), score.shape)
-    return int(x0 + idx[1]), int(y0 + idx[0])
+    d = np.sqrt((xx - x) ** 2 + (yy - y) ** 2).astype(np.float32)
+    score = win + spatial_weight * d          # nearest good-matching ink wins
+    score[win > 0.45] = np.inf                # never snap onto a non-matching pixel
+    if not np.isfinite(score.min()):
+        return x, y                           # no matching ink nearby: keep the click
+    iy, ix = np.unravel_index(np.argmin(score), score.shape)
+    return int(x0 + ix), int(y0 + iy)
 
 
 
@@ -387,10 +384,18 @@ except ImportError:
 
 if _HAS_NUMBA:
     @njit
-    def _fast_dp_full(sub, dxs, move_pen, curvature_penalty, start_x, start_cost, endpoint_slope_weight, start_slope):
+    def _fast_dp_full(sub, dxs, move_pen, curvature_penalty, start_x, start_cost, endpoint_slope_weight, start_slope, vsub, hsub, ride_penalty, max_slope_px, traverse_weight):
         rows, cols = sub.shape
         K = len(dxs)
         INF = np.float32(1e9)
+        
+        cum_sub = np.empty_like(sub)
+        for r in range(rows):
+            s = np.float32(0.0)
+            for c in range(cols):
+                s += sub[r, c]
+                cum_sub[r, c] = s
+                
         dp = np.full((cols, K), INF, dtype=np.float32)
         if start_slope == -999:
             dp[start_x, :] = start_cost
@@ -425,7 +430,21 @@ if _HAS_NUMBA:
                 for x in range(cols):
                     src_x = x - dx
                     if 0 <= src_x < cols:
-                        new_dp[x, k] = A[src_x, k] + pen
+                        if dx > 1:
+                            traverse_cost = (cum_sub[r, x-1] - cum_sub[r, src_x]) * traverse_weight
+                        elif dx < -1:
+                            traverse_cost = (cum_sub[r, src_x-1] - cum_sub[r, x]) * traverse_weight
+                        else:
+                            traverse_cost = np.float32(0.0)
+                            
+                        # Directional Ride penalty
+                        ride_cost = np.float32(0.0)
+                        if abs(dx) <= 1:
+                            ride_cost += vsub[r, x] * ride_penalty
+                        if abs(dx) >= max(2, max_slope_px // 2):
+                            ride_cost += hsub[r, x] * ride_penalty
+                            
+                        new_dp[x, k] = A[src_x, k] + pen + traverse_cost + ride_cost
                         parents[r, x, k] = arg[src_x, k]
             for x in range(cols):
                 cst = sub[r, x]
@@ -450,6 +469,11 @@ def _trace_segment_dp(
     x_max: int = -1,
     guide_weight: float = 0.0, # FIX 2: Add guide_weight parameter with default 0.0
     trajectory: Optional[np.ndarray] = None, # FIX 2: Add trajectory parameter with default None
+    downscale_factor: int = 1,
+    vgrid: Optional[np.ndarray] = None,          # NEW
+    hgrid: Optional[np.ndarray] = None,          # NEW
+    ride_penalty: float = 10.0,                   # NEW
+    is_dashed: bool = False,
 ) -> Tuple[List[List[int]], float, List[int]]:
     """
     Globally-optimal path between two anchors with exactly one x per row,
@@ -482,15 +506,51 @@ def _trace_segment_dp(
     cx1 = min(w, max(xs, xe) + corridor_pad + 1)
     if x_min >= 0: cx0 = max(cx0, x_min)
     if x_max >= 0: cx1 = min(cx1, x_max + 1)
+    
+    # Ensure the DP corridor ALWAYS includes the start and end anchors, 
+    # even if they snapped slightly outside the strict x_min/x_max track walls.
+    cx0 = min(cx0, xs, xe)
+    cx1 = max(cx1, xs + 1, xe + 1)
+    
     sub = cost[ys:ye + 1, cx0:cx1]
-    rows, cols = sub.shape
+    orig_rows, orig_cols = sub.shape
+    
+    vsub = (vgrid[ys:ye + 1, cx0:cx1].astype(np.float32)
+            if vgrid is not None else np.zeros_like(sub, dtype=np.float32))
+    hsub = (hgrid[ys:ye + 1, cx0:cx1].astype(np.float32)
+            if hgrid is not None else np.zeros_like(sub, dtype=np.float32))
+
+    df = downscale_factor
+    if df > 1 and orig_rows > df * 2 and orig_cols > df * 2:
+        nh, nw = orig_rows // df, orig_cols // df
+        # MIN-pool cost: a thin low-cost ink line survives downscaling
+        # (INTER_AREA averaging blended it into the background).
+        run_sub  = sub[:nh*df, :nw*df].reshape(nh, df, nw, df).min(axis=(1, 3))
+        # MAX-pool grid masks so gridline ride-penalties are not lost.
+        run_vsub = vsub[:nh*df, :nw*df].reshape(nh, df, nw, df).max(axis=(1, 3))
+        run_hsub = hsub[:nh*df, :nw*df].reshape(nh, df, nw, df).max(axis=(1, 3))
+        run_xs = (xs - cx0) // df
+        run_xe = (xe - cx0) // df
+    else:
+        df = 1
+        run_sub = sub
+        run_vsub = vsub
+        run_hsub = hsub
+        run_xs = xs - cx0
+        run_xe = xe - cx0
+        
+    rows, cols = run_sub.shape
     
     if guide_weight > 0.0 and trajectory is not None:
-        sub = sub.copy() # FIX 2: Copy to avoid modifying the original cost map
+        run_sub = run_sub.copy()
         x_target = trajectory - cx0
+        if df > 1:
+            x_target_small = cv2.resize(x_target.astype(np.float32), (1, rows), interpolation=cv2.INTER_LINEAR).flatten() / df
+        else:
+            x_target_small = x_target
         col_indices = np.arange(cols)
-        pull = guide_weight * (col_indices[None, :] - x_target[:, None])**2
-        sub += pull.astype(np.float32) # FIX 2: Apply quadratic pull toward anchor trajectory
+        pull = guide_weight * (col_indices[None, :] - x_target_small[:, None])**2
+        run_sub += pull.astype(np.float32)
 
     S = max_slope_px
     K = 2 * S + 1
@@ -500,17 +560,19 @@ def _trace_segment_dp(
     INF = np.float32(1e9)
     if _HAS_NUMBA:
         dp, parents = _fast_dp_full(
-            sub, dxs, move_pen, curvature_penalty, 
-            xs - cx0, sub[0, xs - cx0], endpoint_slope_weight, 
-            start_slope if start_slope is not None else -999.0
+            run_sub, dxs, move_pen, curvature_penalty, 
+            run_xs, run_sub[0, run_xs], endpoint_slope_weight, 
+            start_slope if start_slope is not None else -999.0,
+            run_vsub, run_hsub, np.float32(ride_penalty), max_slope_px, np.float32(1.0)
         )
     else:
+        cum_sub = np.cumsum(run_sub, axis=1)
         dp = np.full((cols, K), INF, dtype=np.float32)
         if start_slope is None:
-            dp[xs - cx0, :] = sub[0, xs - cx0]                   # start: any slope
+            dp[run_xs, :] = run_sub[0, run_xs]                   # start: any slope
         else:
             for k in range(K):
-                dp[xs - cx0, k] = sub[0, xs - cx0] + endpoint_slope_weight * abs(dxs[k] - start_slope)
+                dp[run_xs, k] = run_sub[0, run_xs] + endpoint_slope_weight * abs(dxs[k] - start_slope)
         parents = np.zeros((rows, cols, K), dtype=np.int16)
 
         for r in range(1, rows):
@@ -535,12 +597,25 @@ def _trace_segment_dp(
                 else:
                     src = slice(-dx, cols)
                     dst = slice(0, cols + dx)
-                new_dp[dst, k] = A[src, k] + move_pen[k]
+                
+                base_cost = A[src, k] + move_pen[k]
+                traverse_w = 1.0
+                if dx > 1:
+                    base_cost += (cum_sub[r, slice(dx-1, cols-1)] - cum_sub[r, slice(0, cols-dx)]) * traverse_w
+                elif dx < -1:
+                    base_cost += (cum_sub[r, slice(-dx-1, cols-1)] - cum_sub[r, slice(0, cols+dx)]) * traverse_w
+                    
+                if abs(dx) <= 1:
+                    base_cost += run_vsub[r, dst] * ride_penalty
+                if abs(dx) >= max(2, max_slope_px // 2):
+                    base_cost += run_hsub[r, dst] * ride_penalty
+                    
+                new_dp[dst, k] = base_cost
                 par_r[dst, k] = arg[src, k]
-            new_dp += sub[r][:, None]
+            new_dp += run_sub[r][:, None]
             dp = new_dp
 
-    xe_l = xe - cx0
+    xe_l = run_xe
     k = int(np.argmin(dp[xe_l]))
     total = dp[xe_l, k]
     if not np.isfinite(total):
@@ -565,14 +640,59 @@ def _trace_segment_dp(
         k = pk
         path_local.append((x, r - 1))
     path_local.reverse()
+    
+    if df > 1:
+        small_xs = [p[0] * df + df // 2 for p in path_local]
+        small_ys = [p[1] * df for p in path_local]
+        full_ys = np.arange(orig_rows)
+        small_ys[0] = 0
+        small_ys[-1] = orig_rows - 1
+        full_xs = np.interp(full_ys, small_ys, small_xs)
+        path_local_full = [(int(round(full_xs[i])), int(full_ys[i])) for i in range(orig_rows)]
+        path_local_full[0] = (xs - cx0, 0)
+        path_local_full[-1] = (xe - cx0, orig_rows - 1)
+    else:
+        path_local_full = path_local
 
     h, w = cost.shape
-    pts = [[min(max(x + cx0, 0), w - 1), min(max(ys + r, 0), h - 1)] for x, r in path_local]
+    pts = [[min(max(x + cx0, 0), w - 1), min(max(ys + r, 0), h - 1)] for x, r in path_local_full]
     costs = [cost[p[1], p[0]] for p in pts]
     c = float(np.mean(costs))
     worst_pt = pts[np.argmax(costs)]
     
     return pts, c, worst_pt
+
+
+def _refine_path_to_ink(points, cost, search_radius: int = 6, momentum: float = 0.15):
+    """
+    Refines a path by snapping each point's X coordinate to the lowest-cost 
+    pixel (ink) within a small horizontal search window.
+    """
+    if cost.size == 0:
+        return points
+    h, w = cost.shape
+    refined = []
+    prev_x = None
+    prev_dx = 0
+    for p in points:
+        if p is None:
+            refined.append(None); prev_x = None; prev_dx = 0; continue
+        x, y = p
+        if y < 0 or y >= h:
+            refined.append([x, y]); prev_x = x; continue
+        x0 = max(0, x - search_radius); x1 = min(w, x + search_radius + 1)
+        window = cost[y, x0:x1]
+        if window.size:
+            cols = np.arange(x0, x1)
+            expected = (prev_x + prev_dx) if prev_x is not None else x
+            score = window + momentum * np.abs(cols - expected)   # bias toward continuity
+            score[window >= 0.45] = np.inf                        # ignore non-ink
+            if np.isfinite(score.min()):
+                bx = x0 + int(np.argmin(score))
+                refined.append([bx, y]); prev_dx = bx - (prev_x if prev_x is not None else bx); prev_x = bx
+                continue
+        refined.append([x, y]); prev_dx = 0 if prev_x is None else (x - prev_x); prev_x = x
+    return refined
 
 
 def _smooth_x(points: List[List[int]], window: int = 5) -> List[List[int]]:
@@ -744,6 +864,9 @@ def _trace_all_segments(
     exclusive: bool = False,
     est_gap_px: float = 15.0,
     is_dotted: bool = False,
+    vgrid_crop: Optional[np.ndarray] = None, # NEW
+    hgrid_crop: Optional[np.ndarray] = None, # NEW
+    ride_penalty: float = 6.0,               # NEW
 ) -> Tuple[List[List[int]], List[dict]]:
     all_points: List[List[int]] = []
     segments = []
@@ -935,8 +1058,8 @@ def _trace_all_segments(
         else:
             if dy > 0:
                 avg_slope = dx / dy
-                max_allowed_slope = max(120, int(track_w + 50))
-                seg_max_slope = int(min(max_allowed_slope, max(max_slope_px, avg_slope * 1.2 + 2)))
+                max_allowed_slope = max(250, int(track_w + 50))
+                seg_max_slope = int(min(max_allowed_slope, max(max_slope_px, avg_slope * 1.5 + 10)))
                 if is_dashed:
                     seg_curvature_penalty = float(np.clip(curvature_penalty - avg_slope * 0.02, 0.03, curvature_penalty))
                 else:
@@ -969,13 +1092,17 @@ def _trace_all_segments(
                 max_slope_px=seg_max_slope,
                 move_penalty=move_penalty,
                 curvature_penalty=seg_curvature_penalty,
-                corridor_pad=int(min(corridor_pad, dx + 40)) if dy > 0 else corridor_pad,
+                corridor_pad=corridor_pad,
                 start_slope=prev_exit_slope if prev_exit_slope != -999.0 else None,
                 endpoint_slope_weight=0.04 if prev_exit_slope != -999.0 else 0.0,
                 x_min=x_min,
                 x_max=x_max,
                 guide_weight=seg_guide_weight, # FIX 2: Pass guide_weight
                 trajectory=seg_trajectory, # FIX 2: Pass trajectory
+                vgrid=vgrid_crop,          # NEW
+                hgrid=hgrid_crop,          # NEW
+                ride_penalty=ride_penalty, # NEW
+                is_dashed=is_dashed,
             )
         
         if is_wrap_jump:
@@ -1017,11 +1144,11 @@ def trace_guided_curve(
     bgr: np.ndarray,
     anchors_xy: List[Tuple[int, int]],
     snap_radius: int = 15,
-    max_slope_px: int = 35,
-    move_penalty: float = 0.02,
-    curvature_penalty: float = 0.06,
-    corridor_pad: int = 120,
-    smooth_window: int = 5,
+    max_slope_px: int = 25,
+    move_penalty: float = 0.005,
+    curvature_penalty: float = 0.01,
+    corridor_pad: int = 400,
+    smooth_window: int = 3,
     suppress_gridlines: bool = True,
     curve_style: str = "auto",
     x_min: int = -1,
@@ -1046,122 +1173,164 @@ def trace_guided_curve(
     bgr_crop = bgr[crop_y_start:crop_y_end, :]
     anchors_crop = [(x, y - crop_y_start) for x, y in anchors]
 
+    # Fallback: derive track walls from strong vertical lines if caller gave no bounds
+    if x_min < 0 or x_max < 0:
+        gray = cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2GRAY)
+        ink = cv2.adaptiveThreshold(gray, 1, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                    cv2.THRESH_BINARY_INV, 31, 10)
+        col_density = ink.sum(axis=0) / float(ink.shape[0])
+        walls = np.where(col_density > 0.9)[0]          # near-solid vertical lines
+        ax_med = int(np.median([x for x, _ in anchors_crop]))
+        left_walls = walls[walls < ax_med]
+        right_walls = walls[walls > ax_med]
+        if left_walls.size and x_min < 0:
+            x_min = int(left_walls.max()) + 2
+        if right_walls.size and x_max < 0:
+            x_max = int(right_walls.min()) - 2
+
     lab = cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2LAB).astype(np.float32)
-    curve_lab = _sample_curve_appearance(lab, anchors_crop)
+    vgrid_crop, hgrid_crop = _detect_grid(bgr_crop)
+    grid_mask = cv2.dilate((vgrid_crop | hgrid_crop).astype(np.uint8), np.ones((3,3), np.uint8)) > 0
     
-    # 1. EXPLICIT STYLE OVERRIDE
-    if curve_style in ("solid", "dashed", "dotted"):
-        is_dotted = (curve_style == "dotted")
-        is_dashed = (curve_style == "dashed") or is_dotted
-        style_source = "user"
-        est_gap_px = 15.0 if curve_style == "dashed" else (5.0 if is_dotted else 0.0)
-        detected_style = curve_style
-    else:                                               # "auto" (make this the new default)
-        detected_style, est_gap_px = _estimate_curve_style(bgr_crop, curve_lab, anchors_crop)
-        is_dashed = (detected_style in ("dashed", "dotted"))
-        is_dotted = (detected_style == "dotted")
-        style_source = "auto"
+    anchors_crop_sorted = sorted(anchors_crop, key=lambda p: p[1])
     
-    # Build cost map with adaptive gap bridging and solid line erasure
-    cost = _build_cost_map(bgr_crop, curve_lab, is_dashed, suppress_gridlines, est_gap_px, is_dotted=is_dotted)
-
-    # 1.5. MUTUAL EXCLUSION: Penalize already-traced curves
-    if occupied_points:
-        for ox, oy in occupied_points:
-            oy_crop = oy - crop_y_start
-            if 0 <= oy_crop < cost.shape[0] and 0 <= ox < cost.shape[1]:
-                y_min, y_max = max(0, oy_crop-1), min(cost.shape[0], oy_crop+2)
-                x_min, x_max = max(0, ox-2), min(cost.shape[1], ox+3)
-                cost[y_min:y_max, x_min:x_max] = np.maximum(cost[y_min:y_max, x_min:x_max], 0.95)
-
-    # 2. ADAPTIVE PHYSICS
-    if is_dashed:
-        curvature_penalty = 0.15  # Extremely stiff to blast through erased solid lines
-    else:
-        curvature_penalty = 0.05  # Highly flexible to follow tight bends
-
-    effective_snap_radius = min(snap_radius, 8) if is_dashed else snap_radius # FIX 3: Cap snap radius to ~8 in dashed mode to avoid snapping to wrong curves
-    snapped_crop = [_snap_anchor(cost, x, y, effective_snap_radius) for (x, y) in anchors_crop]
-    # Well-log curves are functions of depth: order anchors top -> bottom.
-    snapped_crop = sorted(snapped_crop, key=lambda p: p[1])
-    # Drop duplicates on the same row.
-    dedup = [snapped_crop[0]]
-    for p in snapped_crop[1:]:
-        if p[1] != dedup[-1][1]:
-            dedup.append(p)
-    snapped_crop = dedup
-    if len(snapped_crop) < 2:
-        raise ValueError("Anchors collapsed to a single row - click points further apart vertically")
-
-    # 3. SAME-COLOUR CURVE SEPARATION PRIOR
-    if not is_dashed:
-        ink = (cost < 0.45).astype(np.uint8)
-        num, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
-        anchor_labels = {labels[y, x] for (x, y) in snapped_crop if labels[y, x] != 0}
-        if anchor_labels:
-            on_target = np.isin(labels, list(anchor_labels))
-            cost = np.where(on_target, cost * 0.3, cost)
-
-    # Run pass 1
-    pts_1, segs_1 = _trace_all_segments(
-        cost, snapped_crop, is_dashed, max_slope_px, move_penalty, curvature_penalty, corridor_pad, x_min, x_max,
-        prior_trajectory=None, exclusive=False, est_gap_px=est_gap_px, is_dotted=is_dotted
-    )
-
-    if is_dashed:
-        # Run pass 2
-        pts_2, segs_2 = _trace_all_segments(
-            cost, snapped_crop, is_dashed, max_slope_px, move_penalty, curvature_penalty, corridor_pad, x_min, x_max,
-            prior_trajectory=pts_1, exclusive=True, est_gap_px=est_gap_px, is_dotted=is_dotted
-        )
-
-        # Apply the fair-cost guard segment-by-segment
-        final_points = []
-        final_segments = []
+    # We will attempt tracing at most twice.
+    # If the first attempt yields terrible confidence across all segments,
+    # we drop the "worst" anchor (likely a border/gridline click that poisoned the model)
+    # and try again.
+    active_anchors = anchors_crop_sorted[:]
+    
+    for attempt in range(2):
+        curve_lab = _sample_curve_appearance(lab, active_anchors, exclude_mask=grid_mask)
         
-        for i in range(len(snapped_crop) - 1):
-            p_start = snapped_crop[i]
-            p_end = snapped_crop[i + 1]
-            (xs_s, ys_s) = p_start
-            (xe_s, ye_s) = p_end
-            
-            # Slice points belonging to this segment
-            seg_pts_1 = [pt for pt in pts_1 if ys_s <= pt[1] <= ye_s]
-            seg_pts_2 = [pt for pt in pts_2 if ys_s <= pt[1] <= ye_s]
-            
-            cost_map_1 = _apply_anchor_guided_gap_fill(
-                cost, p_start, p_end, x_min=x_min, x_max=x_max,
-                prior_x=None, exclusive=False, est_gap_px=est_gap_px,
-                is_dotted=is_dotted,
-                corridor_half_width=corridor_pad,
-                bridge_half_width=DASHED_BRIDGE_HALF_WIDTH
-            )
-            
-            eval_cost_1 = float(np.mean([cost_map_1[pt[1], pt[0]] for pt in seg_pts_1])) if seg_pts_1 else 1.0
-            eval_cost_2 = float(np.mean([cost_map_1[pt[1], pt[0]] for pt in seg_pts_2])) if seg_pts_2 else 1.0
-            
-            if eval_cost_2 <= eval_cost_1:
-                chosen_pts = seg_pts_2
-                chosen_seg = segs_2[i]
-            else:
-                chosen_pts = seg_pts_1
-                chosen_seg = segs_1[i]
-                
-            if final_points:
-                chosen_pts = [pt for pt in chosen_pts if pt[1] > final_points[-1][1]]
-            final_points.extend(chosen_pts)
-            final_segments.append(chosen_seg)
-            
-        all_points = final_points
-        segments = final_segments
-    else:
-        all_points = pts_1
-        segments = segs_1
+        # 1. EXPLICIT STYLE OVERRIDE
+        if curve_style in ("solid", "dashed", "dotted"):
+            is_dotted = (curve_style == "dotted")
+            is_dashed = (curve_style == "dashed") or is_dotted
+            style_source = "user"
+            est_gap_px = 15.0 if curve_style == "dashed" else (5.0 if is_dotted else 0.0)
+            detected_style = curve_style
+        else:
+            detected_style, est_gap_px = _estimate_curve_style(bgr_crop, curve_lab, active_anchors)
+            is_dashed = (detected_style in ("dashed", "dotted"))
+            is_dotted = (detected_style == "dotted")
+            style_source = "auto"
+        
+        # Build cost map with adaptive gap bridging and solid line erasure
+        cost, _, _ = _build_cost_map(bgr_crop, curve_lab, is_dashed, suppress_gridlines, est_gap_px, is_dotted=is_dotted, vgrid=vgrid_crop, hgrid=hgrid_crop)
 
-    # Strip None sentinels before smoothing (they mark wrap-jump breaks)
+        # 1.5. MUTUAL EXCLUSION: Penalize already-traced curves
+        if occupied_points:
+            for ox, oy in occupied_points:
+                oy_crop = oy - crop_y_start
+                if 0 <= oy_crop < cost.shape[0] and 0 <= ox < cost.shape[1]:
+                    oy0, oy1 = max(0, oy_crop - 1), min(cost.shape[0], oy_crop + 2)
+                    ox0, ox1 = max(0, ox - 2), min(cost.shape[1], ox + 3)
+                    cost[oy0:oy1, ox0:ox1] = np.maximum(cost[oy0:oy1, ox0:ox1], 0.95)
+
+        # 2. ADAPTIVE PHYSICS
+        if is_dashed:
+            curvature_penalty = 0.15
+        else:
+            curvature_penalty = 0.12
+
+        effective_snap_radius = min(snap_radius, 8) if is_dashed else snap_radius
+        snapped_crop = [_snap_anchor_cost(cost, x, y, effective_snap_radius) for (x, y) in active_anchors]
+        snapped_crop = sorted(snapped_crop, key=lambda p: p[1])
+        
+        dedup = [snapped_crop[0]]
+        for p in snapped_crop[1:]:
+            if p[1] != dedup[-1][1]:
+                dedup.append(p)
+        snapped_crop = dedup
+        if len(snapped_crop) < 2:
+            raise ValueError("Anchors collapsed to a single row - click points further apart vertically")
+
+        # 3. SAME-COLOUR CURVE SEPARATION PRIOR
+        if not is_dashed:
+            ink = (cost < 0.45).astype(np.uint8)
+            num, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+            on_target = np.zeros_like(cost, dtype=bool)
+            for (ax, ay) in snapped_crop:
+                lab_id = labels[ay, ax]
+                if lab_id == 0:
+                    continue
+                comp_w = stats[lab_id, cv2.CC_STAT_WIDTH]
+                if comp_w < 0.25 * cost.shape[1]:
+                    on_target |= (labels == lab_id)
+            cost = np.where(on_target, cost * 0.7, cost)
+
+        # Run pass 1
+        pts_1, segs_1 = _trace_all_segments(
+            cost, snapped_crop, is_dashed, max_slope_px, move_penalty, curvature_penalty, corridor_pad, x_min, x_max,
+            prior_trajectory=None, exclusive=False, est_gap_px=est_gap_px, is_dotted=is_dotted,
+            vgrid_crop=vgrid_crop, hgrid_crop=hgrid_crop, ride_penalty=10.0
+        )
+        
+        if is_dashed:
+            pts_2, segs_2 = _trace_all_segments(
+                cost, snapped_crop, is_dashed, max_slope_px, move_penalty, curvature_penalty, corridor_pad, x_min, x_max,
+                prior_trajectory=pts_1, exclusive=True, est_gap_px=est_gap_px, is_dotted=is_dotted,
+                vgrid_crop=vgrid_crop, hgrid_crop=hgrid_crop, ride_penalty=10.0
+            )
+
+            final_points = []
+            final_segments = []
+            
+            for i in range(len(snapped_crop) - 1):
+                p_start = snapped_crop[i]
+                p_end = snapped_crop[i + 1]
+                (xs_s, ys_s) = p_start
+                (xe_s, ye_s) = p_end
+                
+                seg_pts_1 = [pt for pt in pts_1 if ys_s <= pt[1] <= ye_s]
+                seg_pts_2 = [pt for pt in pts_2 if ys_s <= pt[1] <= ye_s]
+                
+                cost_map_1 = _apply_anchor_guided_gap_fill(
+                    cost, p_start, p_end, x_min=x_min, x_max=x_max,
+                    prior_x=None, exclusive=False, est_gap_px=est_gap_px,
+                    is_dotted=is_dotted,
+                    corridor_half_width=corridor_pad,
+                    bridge_half_width=DASHED_BRIDGE_HALF_WIDTH
+                )
+                
+                eval_cost_1 = float(np.mean([cost_map_1[pt[1], pt[0]] for pt in seg_pts_1])) if seg_pts_1 else 1.0
+                eval_cost_2 = float(np.mean([cost_map_1[pt[1], pt[0]] for pt in seg_pts_2])) if seg_pts_2 else 1.0
+                
+                if eval_cost_2 <= eval_cost_1:
+                    chosen_pts = seg_pts_2
+                    chosen_seg = segs_2[i]
+                else:
+                    chosen_pts = seg_pts_1
+                    chosen_seg = segs_1[i]
+                    
+                if final_points:
+                    chosen_pts = [pt for pt in chosen_pts if pt[1] > final_points[-1][1]]
+                final_points.extend(chosen_pts)
+                final_segments.append(chosen_seg)
+                
+            all_points = final_points
+            segments = final_segments
+        else:
+            all_points = pts_1
+            segments = segs_1
+            
+        # Sanity Gate: if all segments are terrible confidence and we have > 2 anchors,
+        # we try again with the worst anchor removed (it probably poisoned the appearance model)
+        if attempt == 0 and len(active_anchors) > 2 and all(s["confidence"] < 0.4 for s in segments):
+            # find the anchor bounding the worst segment
+            worst_seg = min(segments, key=lambda s: s["confidence"])
+            # remove the top anchor of the worst segment (heuristic)
+            bad_y = worst_seg["from"][1]
+            active_anchors = [p for p in active_anchors if p[1] != bad_y]
+            continue
+        
+        break # Success or max attempts reached
+
+    # Strip None sentinels before smoothing
     all_points_clean = [p for p in all_points if p is not None]
+    all_points_clean = _refine_path_to_ink(all_points_clean, cost, search_radius=3)
     all_points_clean = _smooth_x(all_points_clean, smooth_window)
-    # Rebuild with Nones reinserted
     none_positions = {i for i, p in enumerate(all_points) if p is None}
     out_iter = iter(all_points_clean)
     all_points = [None if i in none_positions else next(out_iter) for i in range(len(all_points))]
@@ -1201,9 +1370,9 @@ def trace_guided_curve(
         edge_out = 'right'
 
     return {
-        "points": all_points,                       # [[x, y], ...] one per row
+        "points": all_points,
         "snapped_anchors": [list(p) for p in snapped],
-        "segments": segments,                       # per-segment confidence
+        "segments": segments,
         "confidence": round(overall_conf, 4),
         "curve_color_lab": [round(float(v), 1) for v in curve_lab],
         "num_points": len(all_points),
@@ -1264,11 +1433,11 @@ def _register_endpoint():
         image_id: Optional[str] = Form(None),
         points: str = Form(...),            # JSON: [[x, y], [x, y], ...] image-pixel coords
         snap_radius: int = Form(15),
-        max_slope_px: int = Form(35),
-        move_penalty: float = Form(0.02),
-        curvature_penalty: float = Form(0.06),
-        corridor_pad: int = Form(120),
-        smooth_window: int = Form(5),
+        max_slope_px: int = Form(40),
+        move_penalty: float = Form(0.005),
+        curvature_penalty: float = Form(0.01),
+        corridor_pad: int = Form(400),
+        smooth_window: int = Form(3),
         suppress_gridlines: bool = Form(True),
         curve_style: str = Form("solid"),
         x_min: int = Form(-1),
@@ -1299,6 +1468,13 @@ def _register_endpoint():
             if bgr is None:
                 raise HTTPException(400, "Failed to decode image")
             image_id = _cache_image(bgr)
+
+        h, w = bgr.shape[:2]
+        track_w = (x_max - x_min) if (x_min >= 0 and x_max >= 0) else w
+        if track_w < 120 or h < 200:
+            raise HTTPException(422, detail=(
+                "Image resolution too low for curve tracking "
+                f"(track width {track_w}px). Upload the original-resolution log."))
 
         try:
             anchors = json.loads(points)
@@ -1334,6 +1510,11 @@ def _register_endpoint():
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except Exception as e:
+            import traceback
+            err_trace = traceback.format_exc()
+            print(err_trace)
+            raise HTTPException(400, f"Backend Crash: {str(e)}\n{err_trace}")
 
         result["image_id"] = image_id
         return result

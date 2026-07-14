@@ -150,7 +150,7 @@ cd python-multiline
 python -m venv ../.venv
 . ../.venv/bin/activate
 pip install -r requirements.txt
-python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 5
 ```
 
 Main Python endpoints:
@@ -182,7 +182,7 @@ cd js-backend && npm start
 Terminal 2:
 
 ```bash
-cd python-multiline && python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+cd python-multiline && python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 5
 ```
 
 Terminal 3:

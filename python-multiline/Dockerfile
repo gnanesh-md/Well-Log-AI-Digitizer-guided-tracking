@@ -6,7 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    VIRTUAL_ENV=/opt/venv
+    VIRTUAL_ENV=/opt/venv \
+    OMP_NUM_THREADS=2 \
+    MKL_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=2
 
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
@@ -50,4 +53,4 @@ COPY . .
 
 EXPOSE 8123
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8123"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8123", "--workers", "5"]

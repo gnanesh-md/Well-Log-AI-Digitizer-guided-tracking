@@ -392,15 +392,16 @@ def find_vertical_track_bounds(mask: np.ndarray, total_graphs: int) -> list[tupl
         return [(int(round(i * step)), int(round((i + 1) * step))) for i in range(total_graphs)]
 
     gap_groups = []
-    group = [int(gap_cols[0])]
-    for col in gap_cols[1:]:
-        col = int(col)
-        if col - group[-1] <= 3:
-            group.append(col)
-        else:
-            gap_groups.append(group)
-            group = [col]
-    gap_groups.append(group)
+    if len(gap_cols) > 0:
+        group = [int(gap_cols[0])]
+        for col in gap_cols[1:]:
+            col = int(col)
+            if col - group[-1] <= 3:
+                group.append(col)
+            else:
+                gap_groups.append(group)
+                group = [col]
+        gap_groups.append(group)
 
     internal_gaps = []
     edge_margin = max(10, int(width * 0.02))
@@ -1491,7 +1492,41 @@ def encode_png_base64(image_rgb):
 
 
 def decode_upload_image(data, ext):
+    if ext == "pdf":
+        try:
+            import fitz
+            doc = fitz.open(stream=data, filetype="pdf")
+            frames = []
+            for page in doc:
+                pix = page.get_pixmap(dpi=100)
+                img_data = pix.tobytes("ppm")
+                img = Image.open(io.BytesIO(img_data)).convert("RGB")
+                frames.append(np.array(img))
+            if frames:
+                if len(frames) == 1:
+                    return frames[0]
+                max_w = max(f.shape[1] for f in frames)
+                padded = []
+                for f in frames:
+                    if f.shape[1] < max_w:
+                        pad_width = ((0, 0), (0, max_w - f.shape[1]), (0, 0))
+                        f = np.pad(f, pad_width, mode='constant', constant_values=255)
+                    padded.append(f)
+                return np.vstack(padded)
+        except Exception as e:
+            print(f"[WARN] PDF decode failed: {e}")
+
     if ext in ("tif", "tiff"):
+        # Try cv2 first for extreme speed on large well logs
+        np_arr = np.frombuffer(data, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+        if img is not None:
+            if img.ndim == 3:
+                return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            elif img.ndim == 2:
+                return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        
+        # Fallback to Pillow for multi-page TIFFs if cv2 fails
         try:
             with Image.open(io.BytesIO(data)) as image:
                 frames = []
@@ -1510,7 +1545,7 @@ def decode_upload_image(data, ext):
                         padded.append(f)
                     return np.vstack(padded)
         except Exception as e:
-            print(f"[WARN] Pillow TIFF decode failed, trying OpenCV: {e}")
+            print(f"[WARN] Pillow TIFF decode failed: {e}")
 
     np_arr = np.frombuffer(data, np.uint8)
     img = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
@@ -1893,7 +1928,18 @@ def create_las_with_dict(json_data, curves_dict, curve_metadata=None, depth_unit
     curve_metadata = curve_metadata or {}
     depth_unit = depth_unit or "FT"
     
-    all_depths = np.concatenate([np.asarray(depths, dtype=float) for depths, _ in curves_dict.values()])
+    valid_curves = {}
+    for name, val in curves_dict.items():
+        if val and val[0] is not None and len(val[0]) > 0:
+            valid_curves[name] = val
+
+    if not valid_curves:
+        raise ValueError("No valid curve data points were found to generate the LAS file. Trace each column before exporting.")
+
+    all_depths = np.concatenate([np.asarray(depths, dtype=float) for depths, _ in valid_curves.values()])
+    if len(all_depths) == 0:
+        raise ValueError("No valid curve data points were found to generate the LAS file. Trace each column before exporting.")
+
     start_depth = float(np.nanmin(all_depths))
     stop_depth = float(np.nanmax(all_depths))
     try:
@@ -1923,7 +1969,7 @@ def create_las_with_dict(json_data, curves_dict, curve_metadata=None, depth_unit
     data_cols = [ref_depth_array]
 
     # Interpolate each curve to the reference depth
-    for idx, (line_name, (depths, values)) in enumerate(curves_dict.items(), start=1):
+    for idx, (line_name, (depths, values)) in enumerate(valid_curves.items(), start=1):
         try:
             depth_arr = np.asarray(depths, dtype=float)
             value_arr = np.asarray(values, dtype=float)
@@ -2287,9 +2333,57 @@ async def convert_image(file: UploadFile = File(...)):
     img = decode_upload_image(data, ext)
     if img is None:
         raise HTTPException(400, "Failed to decode image")
-    
-    _, encoded = cv2.imencode('.webp', cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_WEBP_QUALITY, 90])
-    return Response(content=encoded.tobytes(), media_type="image/webp")
+    # Use JPEG encoding for vastly faster conversion on huge well logs
+    success, encoded = cv2.imencode('.jpg', cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    if not success:
+        raise HTTPException(500, "Failed to encode image to JPEG")
+    return Response(content=encoded.tobytes(), media_type="image/jpeg")
+
+from fastapi.responses import Response
+from pdf_image_extractor import extract_pdf_images, extract_single_image
+import uuid, time
+
+# very small TTL cache: token -> (pdf_bytes, timestamp)
+_PDF_CACHE = {}
+_PDF_TTL = 60 * 30  # 30 min
+
+def _cache_put(pdf_bytes):
+    token = uuid.uuid4().hex
+    now = time.time()
+    for k, (_, ts) in list(_PDF_CACHE.items()):
+        if now - ts > _PDF_TTL:
+            _PDF_CACHE.pop(k, None)
+    _PDF_CACHE[token] = (pdf_bytes, now)
+    return token
+
+@app.post("/extract-pdf-images")
+async def extract_pdf_images_endpoint(
+    file: UploadFile = File(...),
+    min_width: int = Form(200),
+    min_height: int = Form(150),
+    render_pages: bool = Form(False),
+    render_dpi: int = Form(120),
+    max_images: int = Form(400),
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are supported here")
+    pdf_bytes = await file.read()
+    token = _cache_put(pdf_bytes)
+    images_result = extract_pdf_images(
+        pdf_bytes,
+        min_width=min_width, min_height=min_height,
+        render_pages=render_pages, render_dpi=render_dpi,
+        max_images=max_images,
+    )
+    return JSONResponse({"token": token, "count": images_result["count"], "images": images_result["images"]})
+
+@app.get("/pdf-image/{token}/{image_id}")
+async def pdf_image_full(token: str, image_id: str):
+    entry = _PDF_CACHE.get(token)
+    if not entry:
+        raise HTTPException(404, "PDF expired — re-run PDF Summarize")
+    png = extract_single_image(entry[0], image_id)
+    return Response(content=png, media_type="image/png")
 
 @app.post("/segment-and-graph")
 async def segment_and_graph(
@@ -2298,18 +2392,60 @@ async def segment_and_graph(
     total_graphs: float = Form(2),
     patch_size: int = Form(96),
     batch_size: int = Form(32),
-    include_header_ocr: bool = Form(True),
+    include_header_ocr: bool = Form(False),
     include_depth_ocr: bool = Form(False),
     include_graph_vision: bool = Form(False),
     manual_graph_box: Optional[str] = Form(None),
     skip_curves: bool = Form(False),
+    page_number: int = Form(1),
 ):
     ext = file.filename.lower().rsplit(".", 1)[-1]
-    if ext not in ("tif", "tiff", "png", "jpg", "jpeg"):
+    if ext not in ("tif", "tiff", "png", "jpg", "jpeg", "pdf"):
         raise HTTPException(400, "Unsupported image format")
 
     data = await file.read()
-    img = decode_upload_image(data, ext)
+    
+    if ext == "pdf":
+        import fitz
+        doc = fitz.open(stream=data, filetype="pdf")
+        if page_number < 1 or page_number > doc.page_count:
+            raise HTTPException(400, "Invalid page number")
+        
+        page = doc.load_page(page_number - 1)
+        img_list = page.get_images(full=True)
+        img_extracted = False
+        
+        if img_list:
+            largest_area = 0
+            best_img_bytes = None
+            for img_info in img_list:
+                xref = img_info[0]
+                base = doc.extract_image(xref)
+                if base:
+                    w = base.get("width", 0)
+                    h = base.get("height", 0)
+                    if w * h > largest_area:
+                        largest_area = w * h
+                        best_img_bytes = base["image"]
+            
+            if best_img_bytes and largest_area > 100000:
+                import io
+                try:
+                    img_pil = Image.open(io.BytesIO(best_img_bytes)).convert("RGB")
+                    img = np.array(img_pil)
+                    img_extracted = True
+                except Exception as e:
+                    print(f"Failed to decode embedded PDF image: {e}")
+                    
+        if not img_extracted:
+            pix = page.get_pixmap(dpi=120)
+            img_pil = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            img = np.array(img_pil)
+            
+        doc.close()
+    else:
+        img = decode_upload_image(data, ext)
+
     if img is None:
         raise HTTPException(400, "Failed to decode image")
 
@@ -2353,7 +2489,7 @@ async def segment_and_graph(
     image_for_curve_pipeline = image_without_b
     tiff_preprocessing_info = None
 
-    if ext in ("tif", "tiff"):
+    if ext in ("tif", "tiff", "pdf"):
         try:
             body_bgr = cv2.cvtColor(image_without_b, cv2.COLOR_RGB2BGR)
             result = process_image_for_backend(body_bgr, model_path=TIFF_CHUNK_MODEL_PATH)
@@ -2477,11 +2613,18 @@ async def segment_and_graph(
         image_b64 = encode_png_base64(image_without_b)
 
     header_b64 = encode_png_base64(header_image)
+    box = layout_info.get("graph_box", {"x1": 0, "y1": 0, "x2": img.shape[1], "y2": img.shape[0]})
+    cropped_body = image_without_b
+    if cropped_body is None or cropped_body.size == 0:
+        cropped_body = img  # safety fallback
+    graph_body_b64 = encode_png_base64(cropped_body)
 
     return JSONResponse({
         "overlay_png_base64": image_b64,
         "header_png_base64": header_b64,
         "graph_png_base64": image_b64,
+        "graph_body_png_base64": graph_body_b64,
+        "graph_box": layout_info.get("graph_box", {"x1": 0, "y1": 0, "x2": img.shape[1], "y2": img.shape[0]}),
         "graph_points": graph_points,
         "graph_boundaries": graph_boundaries,
         "curve_value_match": curve_value_match,
@@ -2532,7 +2675,7 @@ async def analyze_graph_image_endpoint(
     model: Optional[str] = Form(None),
 ):
     ext = file.filename.lower().rsplit(".", 1)[-1]
-    if ext not in ("png", "jpg", "jpeg", "webp", "gif", "tif", "tiff"):
+    if ext not in ("png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "pdf"):
         raise HTTPException(400, "Unsupported image format")
 
     data = await file.read()
@@ -2549,8 +2692,8 @@ async def analyze_graph_image_endpoint(
 @app.post("/tiff-chunk-detect")
 async def tiff_chunk_detect(file: UploadFile = File(...)):
     ext = file.filename.lower().rsplit(".", 1)[-1]
-    if ext not in ("tif", "tiff"):
-        raise HTTPException(400, "Only TIFF files are supported")
+    if ext not in ("tif", "tiff", "pdf"):
+        raise HTTPException(400, "Only TIFF and PDF files are supported")
 
     if not TIFF_CHUNK_MODEL_PATH:
         raise HTTPException(500, "TIFF chunk model path is not configured")
@@ -2730,6 +2873,7 @@ async def generate_las(request: Request):
         )
         # Rescale pixel data
         rescaled_data = {}
+        skipped = []
         for graph_name, graph in graph_info.items():
             x_range = graph["x_range"]
             y_range = graph["y_range"]
@@ -2741,13 +2885,23 @@ async def generate_las(request: Request):
                 )
 
             for line_name, line_points in graph["lines"].items():
-                current_pixel_bounds = tuple(pixel_bounds) if pixel_bounds else get_pixel_bounds(line_points)
+                pts = [p for p in (line_points or []) if p]
+                if not pts:
+                    skipped.append(line_name)
+                    continue
+                current_pixel_bounds = tuple(pixel_bounds) if pixel_bounds else get_pixel_bounds(pts)
                 rescaled_data[line_name] = pixel_points_to_physical(
-                    line_points,
+                    pts,
                     current_pixel_bounds,
                     x_range,
                     y_range,
                 )
+
+        if not rescaled_data:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No curve points received for: {', '.join(skipped) or 'all tracks'}. Trace each column before exporting."
+            )
 
         # Generate curves
         curves_dict = {}
@@ -2788,6 +2942,10 @@ async def generate_las(request: Request):
 
         return JSONResponse(content={"las_file_base64": base64_las})
 
+    except HTTPException as he:
+        raise he
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         print("Error in generate_las:", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -2849,6 +3007,18 @@ async def decode_las(request: Request):
         if not las_bytes:
             raise HTTPException(status_code=400, detail="Empty request body")
         
+        # Read LAS using laspy
+        with io.BytesIO(las_bytes) as buf:
+            las = laspy.read(buf)
+            # Extract x, y coordinates
+            coords = np.column_stack((las.x, las.y))
+            # Convert to list of list of floats
+            points = coords.tolist()
+            
+        return JSONResponse(content={"points": points})
+    except Exception as e:
+        print("Error in decode_las:", e)
+        raise HTTPException(status_code=500, detail=f"Failed to decode LAS: {str(e)}")
         # Read LAS using laspy
         with io.BytesIO(las_bytes) as buf:
             las = laspy.read(buf)
